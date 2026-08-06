@@ -47,10 +47,19 @@ def _patch_xhshow_a3_hash():
 
     _original_build = CryptoProcessor.build_payload_array
 
-    def _patched_build(self, hex_parameter, a1_value, app_identifier="xhs-pc-web",
-                       string_param="", timestamp=None, sign_state=None):
-        payload = _original_build(self, hex_parameter, a1_value, app_identifier,
-                                  string_param, timestamp, sign_state)
+    def _patched_build(self, hex_parameter, hex_md5_path, a1_value,
+                       app_identifier="xhs-pc-web", string_param="",
+                       timestamp=None, sign_state=None):
+        payload = _original_build(
+            self,
+            hex_parameter,
+            hex_md5_path,
+            a1_value,
+            app_identifier,
+            string_param,
+            timestamp,
+            sign_state,
+        )
         # 仅当 content_string 不含 "{" 时修复 (即 GET 请求)
         if "{" not in string_param:
             correct_md5_hex = hashlib.md5(string_param.encode("utf-8")).hexdigest()
@@ -149,7 +158,7 @@ def sign_with_xhshow(
         d_value = hashlib.md5(content_string.encode("utf-8")).hexdigest()
 
         payload_array = xhshow_client.crypto_processor.build_payload_array(
-            d_value, a1_value, "xhs-pc-web", content_string, ts
+            d_value, d_value, a1_value, "xhs-pc-web", content_string, ts
         )
         xor_result = xhshow_client.crypto_processor.bit_ops.xor_transform_array(payload_array)
         config = xhshow_client.config

@@ -33,6 +33,10 @@ from cache.cache_factory import CacheFactory
 from tools import utils
 
 
+LOGIN_CHECK_MAX_ATTEMPTS = 120
+LOGIN_CHECK_INTERVAL_SECONDS = 1
+
+
 class XiaoHongShuLogin(AbstractLogin):
 
     def __init__(self,
@@ -48,17 +52,68 @@ class XiaoHongShuLogin(AbstractLogin):
         self.login_phone = login_phone
         self.cookie_str = cookie_str
 
-    @retry(stop=stop_after_attempt(600), wait=wait_fixed(1), retry=retry_if_result(lambda value: value is False))
+    def _iter_context_pages(self) -> list[Page]:
+        pages = [self.context_page]
+        try:
+            pages.extend(self.browser_context.pages)
+        except Exception:
+            pass
+
+        unique_pages: list[Page] = []
+        seen_ids: set[int] = set()
+        for page in pages:
+            page_id = id(page)
+            if page_id in seen_ids:
+                continue
+            seen_ids.add(page_id)
+            unique_pages.append(page)
+        return unique_pages
+
+    async def _has_logged_in_page(self) -> bool:
+        for page in self._iter_context_pages():
+            try:
+                current_url = page.url or ""
+                if "/user/profile/" in current_url:
+                    utils.logger.info(
+                        f"[XiaoHongShuLogin.check_login_state] Login status confirmed by page URL: {current_url}"
+                    )
+                    return True
+            except Exception:
+                continue
+        return False
+
+    async def _try_open_login_dialog(self) -> bool:
+        login_button_selectors = [
+            "xpath=//*[@id='app']/div[1]/div[2]/div[1]/ul/div[1]/button",
+            "button:has-text('登录')",
+            "text=登录",
+        ]
+        for selector in login_button_selectors:
+            try:
+                await self.context_page.locator(selector).first.click(timeout=3000)
+                await asyncio.sleep(1)
+                utils.logger.info(
+                    f"[XiaoHongShuLogin.login_by_qrcode] Clicked login entry with selector: {selector}"
+                )
+                return True
+            except Exception:
+                continue
+        return False
+
+    @retry(stop=stop_after_attempt(LOGIN_CHECK_MAX_ATTEMPTS), wait=wait_fixed(LOGIN_CHECK_INTERVAL_SECONDS), retry=retry_if_result(lambda value: value is False))
     async def check_login_state(self, no_logged_in_session: str) -> bool:
         """
         Verify login status using dual-check: UI elements and Cookies.
         """
+        if await self._has_logged_in_page():
+            return True
+
         # 1. Priority check: Check if the "Me" (Profile) node appears in the sidebar
         try:
             # Selector for elements containing "Me" text with a link pointing to the profile
             # XPath Explanation: Find a span with text "Me" inside an anchor tag (<a>) 
             # whose href attribute contains "/user/profile/"
-            user_profile_selector = "xpath=//a[contains(@href, '/user/profile/')]//span[text()='我']"
+            user_profile_selector = "xpath=//a[contains(@href, '/user/profile/')][.//span[normalize-space()='我']]"
             
             # Set a short timeout since this is called within a retry loop
             is_visible = await self.context_page.is_visible(user_profile_selector, timeout=500)
@@ -99,6 +154,10 @@ class XiaoHongShuLogin(AbstractLogin):
     async def login_by_mobile(self):
         """Login xiaohongshu by mobile"""
         utils.logger.info("[XiaoHongShuLogin.login_by_mobile] Begin login xiaohongshu by mobile ...")
+        if await self._has_logged_in_page():
+            utils.logger.info("[XiaoHongShuLogin.login_by_mobile] Browser is already logged in, skip mobile login.")
+            return
+
         await asyncio.sleep(1)
         try:
             # After entering Xiaohongshu homepage, the login dialog may not pop up automatically, need to manually click login button
@@ -167,37 +226,38 @@ class XiaoHongShuLogin(AbstractLogin):
     async def login_by_qrcode(self):
         """login xiaohongshu website and keep webdriver login state"""
         utils.logger.info("[XiaoHongShuLogin.login_by_qrcode] Begin login xiaohongshu by qrcode ...")
+        if await self._has_logged_in_page():
+            utils.logger.info("[XiaoHongShuLogin.login_by_qrcode] Browser is already logged in, skip qrcode login.")
+            return
+
+        current_cookie = await self.browser_context.cookies()
+        _, cookie_dict = utils.convert_cookies(current_cookie)
+        no_logged_in_session = cookie_dict.get("web_session")
+
         # login_selector = "div.login-container > div.left > div.qrcode > img"
         qrcode_img_selector = "xpath=//img[@class='qrcode-img']"
         # find login qrcode
         base64_qrcode_img = await utils.find_login_qrcode(
             self.context_page,
-            selector=qrcode_img_selector
+            selector=qrcode_img_selector,
+            timeout=5000,
         )
         if not base64_qrcode_img:
-            utils.logger.info("[XiaoHongShuLogin.login_by_qrcode] login failed , have not found qrcode please check ....")
-            # if this website does not automatically popup login dialog box, we will manual click login button
+            utils.logger.info("[XiaoHongShuLogin.login_by_qrcode] QR code not found automatically, trying to open login dialog ...")
             await asyncio.sleep(0.5)
-            login_button_ele = self.context_page.locator("xpath=//*[@id='app']/div[1]/div[2]/div[1]/ul/div[1]/button")
-            await login_button_ele.click()
+            await self._try_open_login_dialog()
             base64_qrcode_img = await utils.find_login_qrcode(
                 self.context_page,
-                selector=qrcode_img_selector
+                selector=qrcode_img_selector,
+                timeout=10000,
             )
             if not base64_qrcode_img:
-                sys.exit()
+                utils.logger.info("[XiaoHongShuLogin.login_by_qrcode] QR code still not found; keep browser open for manual login.")
 
-        # get not logged session
-        current_cookie = await self.browser_context.cookies()
-        _, cookie_dict = utils.convert_cookies(current_cookie)
-        no_logged_in_session = cookie_dict.get("web_session")
-
-        # show login qrcode
-        # fix issue #12
-        # we need to use partial function to call show_qrcode function and run in executor
-        # then current asyncio event loop will not be blocked
-        partial_show_qrcode = functools.partial(utils.show_qrcode, base64_qrcode_img)
-        asyncio.get_running_loop().run_in_executor(executor=None, func=partial_show_qrcode)
+        if base64_qrcode_img:
+            # Show the QR code in a separate image viewer when it is available.
+            partial_show_qrcode = functools.partial(utils.show_qrcode, base64_qrcode_img)
+            asyncio.get_running_loop().run_in_executor(executor=None, func=partial_show_qrcode)
 
         utils.logger.info(f"[XiaoHongShuLogin.login_by_qrcode] waiting for scan code login, remaining time is 120s")
         try:

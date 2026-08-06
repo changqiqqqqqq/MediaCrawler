@@ -30,6 +30,11 @@ COOKIES = ""
 CRAWLER_TYPE = (
     "search"  # Crawling type, search (keyword search) | detail (post details) | creator (creator homepage data)
 )
+
+# Whether to stop after confirming/saving login state. This is used by embedding
+# apps that only need QR-login verification and should not run a sample crawl.
+LOGIN_ONLY = False
+
 # Whether to enable IP proxy
 ENABLE_IP_PROXY = False
 
