@@ -77,6 +77,7 @@ def _apply_env_overrides() -> None:
         "BROWSER_LAUNCH_TIMEOUT",
         "START_PAGE",
         "CRAWLER_MAX_NOTES_COUNT",
+        "CRAWLER_MAX_SLEEP_SEC",
         "MAX_CONCURRENCY_NUM",
         "IP_PROXY_POOL_COUNT",
         "CRAWLER_MAX_COMMENTS_COUNT_SINGLENOTES",

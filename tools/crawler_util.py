@@ -25,11 +25,14 @@
 
 import base64
 import json
+import os
 import random
 import re
+import time
 import urllib
 import urllib.parse
 from io import BytesIO
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple, cast
 
 import httpx
@@ -86,8 +89,37 @@ async def find_qrcode_img_from_canvas(page: Page, canvas_selector: str) -> str:
     return base64_image
 
 
+def _write_login_qrcode_output(qr_code: str) -> None:
+    output_path = os.getenv("MEDIA_CRAWLER_QRCODE_OUTPUT", "").strip()
+    if not output_path:
+        return
+    try:
+        normalized_qrcode = qr_code.split(",", 1)[1] if "," in qr_code else qr_code
+        payload = {
+            "qrcode": normalized_qrcode,
+            "data_uri": f"data:image/png;base64,{normalized_qrcode}",
+            "updated_at": time.time(),
+        }
+        target = Path(output_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temp_target = target.parent / f".{target.name}.tmp"
+        temp_target.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        temp_target.replace(target)
+    except Exception as exc:
+        utils.logger.warning(f"[show_qrcode] write qrcode output failed: {exc}")
+
+
+def emit_login_qrcode(qr_code: str) -> None:
+    """Publish a QR code to the embedding application without opening a viewer."""
+    _write_login_qrcode_output(qr_code)
+
+
 def show_qrcode(qr_code) -> None:  # type: ignore
     """parse base64 encode qrcode image and show it"""
+    _write_login_qrcode_output(qr_code)
+    disable_viewer = os.getenv("MEDIA_CRAWLER_DISABLE_QR_VIEWER", "").strip().lower() in {"1", "true", "t", "yes", "y", "on"}
+    if disable_viewer:
+        return
     if "," in qr_code:
         qr_code = qr_code.split(",")[1]
     qr_code = base64.b64decode(qr_code)

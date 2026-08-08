@@ -223,6 +223,30 @@ class XiaoHongShuLogin(AbstractLogin):
         utils.logger.info(f"[XiaoHongShuLogin.login_by_mobile] Login successful then wait for {wait_redirect_seconds} seconds redirect ...")
         await asyncio.sleep(wait_redirect_seconds)
 
+    async def _refresh_login_qrcode(self, selector: str, initial_qrcode: str) -> None:
+        current_qrcode = initial_qrcode
+        while True:
+            await asyncio.sleep(2)
+            try:
+                if await self._has_logged_in_page():
+                    return
+                qrcode_locator = self.context_page.locator(selector).first
+                if await qrcode_locator.count() == 0:
+                    continue
+                next_qrcode = await utils.find_login_qrcode(
+                    self.context_page,
+                    selector=selector,
+                    timeout=1500,
+                )
+                if next_qrcode and next_qrcode != current_qrcode:
+                    utils.emit_login_qrcode(next_qrcode)
+                    current_qrcode = next_qrcode
+                    utils.logger.info("[XiaoHongShuLogin.login_by_qrcode] Login QR code refreshed.")
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                continue
+
     async def login_by_qrcode(self):
         """login xiaohongshu website and keep webdriver login state"""
         utils.logger.info("[XiaoHongShuLogin.login_by_qrcode] Begin login xiaohongshu by qrcode ...")
@@ -259,12 +283,19 @@ class XiaoHongShuLogin(AbstractLogin):
             partial_show_qrcode = functools.partial(utils.show_qrcode, base64_qrcode_img)
             asyncio.get_running_loop().run_in_executor(executor=None, func=partial_show_qrcode)
 
+        qrcode_refresh_task = asyncio.create_task(self._refresh_login_qrcode(qrcode_img_selector, base64_qrcode_img))
         utils.logger.info(f"[XiaoHongShuLogin.login_by_qrcode] waiting for scan code login, remaining time is 120s")
         try:
             await self.check_login_state(no_logged_in_session)
         except RetryError:
             utils.logger.info("[XiaoHongShuLogin.login_by_qrcode] Login xiaohongshu failed by qrcode login method ...")
             sys.exit()
+        finally:
+            qrcode_refresh_task.cancel()
+            try:
+                await qrcode_refresh_task
+            except asyncio.CancelledError:
+                pass
 
         wait_redirect_seconds = 5
         utils.logger.info(f"[XiaoHongShuLogin.login_by_qrcode] Login successful then wait for {wait_redirect_seconds} seconds redirect ...")
