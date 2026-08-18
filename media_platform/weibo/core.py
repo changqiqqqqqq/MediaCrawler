@@ -119,6 +119,11 @@ class WeiboCrawler(AbstractCrawler):
                     browser_context=self.browser_context,
                     urls=self.cookie_urls,
                 )
+                if not await self.wb_client.pong():
+                    raise RuntimeError("Weibo login validation failed after login")
+            if getattr(config, "LOGIN_ONLY", False):
+                utils.logger.info("[WeiboCrawler.start] Login-only mode confirmed login state; skip crawling.")
+                return
 
             crawler_type_var.set(config.CRAWLER_TYPE)
             if config.CRAWLER_TYPE == "search":

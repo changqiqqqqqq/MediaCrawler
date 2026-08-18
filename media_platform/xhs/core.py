@@ -110,6 +110,8 @@ class XiaoHongShuCrawler(AbstractCrawler):
                     browser_context=self.browser_context,
                     urls=self.cookie_urls,
                 )
+                if not await self.xhs_client.pong():
+                    raise RuntimeError("Xiaohongshu login validation failed after login")
 
             if getattr(config, "LOGIN_ONLY", False):
                 utils.logger.info("[XiaoHongShuCrawler.start] Login-only mode confirmed login state; skip crawling.")

@@ -118,6 +118,11 @@ class ZhihuCrawler(AbstractCrawler):
                     browser_context=self.browser_context,
                     urls=self.cookie_urls,
                 )
+                if not await self.zhihu_client.pong():
+                    raise RuntimeError("Zhihu login validation failed after login")
+            if getattr(config, "LOGIN_ONLY", False):
+                utils.logger.info("[ZhihuCrawler.start] Login-only mode confirmed login state; skip crawling.")
+                return
 
             # Zhihu's search API requires opening the search page first to access cookies, homepage alone won't work
             utils.logger.info(
