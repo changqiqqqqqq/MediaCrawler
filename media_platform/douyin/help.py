@@ -28,7 +28,10 @@ import random
 import re
 from typing import Optional
 
-import execjs
+try:
+    import execjs
+except ImportError:
+    execjs = None
 from playwright.async_api import Page
 
 try:
@@ -39,7 +42,14 @@ except ImportError:
 from model.m_douyin import VideoUrlInfo, CreatorUrlInfo
 from tools.crawler_util import extract_url_params_to_dict
 
-douyin_sign_obj = execjs.compile(open('libs/douyin.js', encoding='utf-8-sig').read())
+douyin_sign_obj = None
+if execjs is not None:
+    try:
+        douyin_sign_obj = execjs.compile(open('libs/douyin.js', encoding='utf-8-sig').read())
+    except Exception:
+        # PyExecJS may find no runtime in minimal Linux images. QuickJS below
+        # is the supported fallback and must still be initialized.
+        douyin_sign_obj = None
 douyin_quickjs_obj = None
 if quickjs is not None:
     try:
@@ -114,6 +124,8 @@ def get_a_bogus_from_js(url: str, params: str, user_agent: str):
     sign_js_name = "sign_datail"
     if "/reply" in url:
         sign_js_name = "sign_reply"
+    if douyin_sign_obj is None:
+        return ""
     return douyin_sign_obj.call(sign_js_name, params, user_agent)
 
 
