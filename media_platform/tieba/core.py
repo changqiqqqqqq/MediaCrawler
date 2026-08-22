@@ -128,6 +128,12 @@ class TieBaCrawler(AbstractCrawler):
                     browser_context=self.browser_context,
                     urls=self.cookie_urls,
                 )
+                if not await self.tieba_client.pong(browser_context=self.browser_context):
+                    raise RuntimeError("Tieba login validation failed after login")
+            utils.emit_login_cookies(self.tieba_client.headers.get("Cookie", ""))
+            if getattr(config, "LOGIN_ONLY", False):
+                utils.logger.info("[TiebaCrawler.start] Login-only mode confirmed login state; skip crawling.")
+                return
 
             crawler_type_var.set(config.CRAWLER_TYPE)
             if config.CRAWLER_TYPE == "search":

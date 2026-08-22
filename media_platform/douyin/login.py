@@ -21,6 +21,7 @@
 import asyncio
 import functools
 import sys
+import time
 from typing import Optional
 
 from playwright.async_api import BrowserContext, Page
@@ -56,8 +57,11 @@ class DouYinLogin(AbstractLogin):
             The verification accuracy of the slider verification is not very good... If there are no special requirements, it is recommended not to use Douyin login, or use cookie login
         """
 
-        # popup login dialog
-        await self.popup_login_dialog()
+        # Cookie login does not need the interactive dialog.  On current
+        # Douyin pages the dialog may not exist at all, so waiting for it
+        # makes an otherwise valid cookie login fail before injection.
+        if config.LOGIN_TYPE != "cookie":
+            await self.popup_login_dialog()
 
         # select login type
         if config.LOGIN_TYPE == "qrcode":
@@ -93,37 +97,63 @@ class DouYinLogin(AbstractLogin):
         """Check if the current login status is successful and return True otherwise return False"""
         current_cookie = await self.browser_context.cookies()
         _, cookie_dict = utils.convert_cookies(current_cookie)
-
-        for page in self.browser_context.pages:
-            try:
-                local_storage = await page.evaluate("() => window.localStorage")
-                if local_storage.get("HasUserLogin", "") == "1":
-                    return True
-            except Exception as e:
-                # utils.logger.warn(f"[DouYinLogin] check_login_state waring: {e}")
-                await asyncio.sleep(0.1)
-
-        if cookie_dict.get("LOGIN_STATUS") == "1":
+        authenticated_cookie_names = {
+            "sessionid", "sessionid_ss", "sid_guard", "sid_tt",
+            "uid_tt", "uid_tt_ss", "login_status",
+        }
+        if any(
+            str(value or "").strip()
+            for name, value in cookie_dict.items()
+            if str(name or "").lower() in authenticated_cookie_names
+        ):
             return True
-
         return False
 
     async def popup_login_dialog(self):
         """If the login dialog box does not pop up automatically, we will manually click the login button"""
         dialog_selector = "xpath=//div[@id='login-panel-new']"
+        dialog = self.context_page.locator(dialog_selector).first
+        try:
+            if await dialog.count() and await dialog.is_visible():
+                return
+        except Exception:
+            pass
         try:
             # check dialog box is auto popup and wait for 10 seconds
             await self.context_page.wait_for_selector(dialog_selector, timeout=1000 * 10)
         except Exception as e:
             utils.logger.error(f"[DouYinLogin.popup_login_dialog] login dialog box does not pop up automatically, error: {e}")
+            try:
+                if await dialog.count() and await dialog.is_visible():
+                    return
+            except Exception:
+                pass
             utils.logger.info("[DouYinLogin.popup_login_dialog] login dialog box does not pop up automatically, we will manually click the login button")
-            login_button_ele = self.context_page.locator("xpath=//p[text() = '登录']")
-            await login_button_ele.click()
-            await asyncio.sleep(0.5)
+            # Douyin has changed the trigger from a <p> to a button several
+            # times.  Use the visible text as the stable contract and retain
+            # the old selector as a fallback for older page variants.
+            for selector in (
+                "button:has-text('登录')",
+                "[role='button']:has-text('登录')",
+                "p:has-text('登录')",
+                "xpath=//p[text() = '登录']",
+            ):
+                try:
+                    login_button_ele = self.context_page.locator(selector).first
+                    if await login_button_ele.is_visible():
+                        await login_button_ele.click(timeout=15000)
+                        break
+                except Exception:
+                    continue
+            await self.context_page.wait_for_selector(dialog_selector, timeout=15000)
 
     async def login_by_qrcode(self):
         utils.logger.info("[DouYinLogin.login_by_qrcode] Begin login douyin by qrcode...")
-        qrcode_img_selector = "xpath=//div[@id='animate_qrcode_container']//img"
+        qrcode_img_selector = (
+            "img[aria-label='二维码'], "
+            "#animate_qrcode_container img, "
+            "#login-panel-new img[src^='data:image']"
+        )
         base64_qrcode_img = await utils.find_login_qrcode(
             self.context_page,
             selector=qrcode_img_selector
@@ -135,6 +165,229 @@ class DouYinLogin(AbstractLogin):
         partial_show_qrcode = functools.partial(utils.show_qrcode, base64_qrcode_img)
         asyncio.get_running_loop().run_in_executor(executor=None, func=partial_show_qrcode)
         await asyncio.sleep(2)
+        await self.wait_for_qrcode_login()
+
+    async def _has_login_state(self) -> bool:
+        current_cookie = await self.browser_context.cookies()
+        _, cookie_dict = utils.convert_cookies(current_cookie)
+        authenticated_cookie_names = {
+            "sessionid", "sessionid_ss", "sid_guard", "sid_tt",
+            "uid_tt", "uid_tt_ss", "login_status",
+        }
+        return any(
+            str(value or "").strip()
+            for name, value in cookie_dict.items()
+            if str(name or "").lower() in authenticated_cookie_names
+        )
+
+    async def _visible_sms_input(self, allow_inactive: bool = False):
+        selector = (
+            "input[placeholder*='验证码'], input[aria-label*='验证码'], "
+            "input[name*='code'], input[class*='code'], input[autocomplete='one-time-code']"
+        )
+        candidates = []
+        for frame in [self.context_page, *self.context_page.frames]:
+            if not allow_inactive and not await self._sms_mode_active(frame):
+                continue
+            locator = frame.locator(selector)
+            for index in range(await locator.count()):
+                candidate = locator.nth(index)
+                try:
+                    if await candidate.is_visible():
+                        context_text = await candidate.evaluate(
+                            """el => {
+                                let node = el;
+                                for (let index = 0; index < 6 && node; index += 1, node = node.parentElement) {
+                                    const text = String(node.innerText || '').trim();
+                                    if (text.includes('短信已发送至') || text.includes('重新发送')) return text;
+                                }
+                                return '';
+                            }"""
+                        )
+                        score = 10 if "短信已发送至" in context_text else 8 if "重新发送" in context_text else 0
+                        candidates.append((score, len(candidates), candidate))
+                except Exception:
+                    continue
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        return candidates[0][2]
+
+    async def _sms_mode_active(self, frame) -> bool:
+        """The QR dialog keeps the SMS form in the DOM; only count it when its tab is active."""
+        try:
+            tab = frame.locator("span:text-is('验证码登录')").first
+            if not await tab.count():
+                return False
+            parent = tab.locator("..").first
+            classes = str(await parent.get_attribute("class") or "")
+            return "qXy4xfTo" in classes
+        except Exception:
+            return False
+
+    async def _choose_sms_verification(self) -> bool:
+        selector = (
+            "button:has-text('验证码验证'), button:has-text('短信验证'), "
+            "[role='button']:has-text('验证码验证'), [role='button']:has-text('短信验证'), "
+            "div[role='button']:has-text('验证码验证'), div[role='button']:has-text('短信验证')"
+        )
+        for frame in [self.context_page, *self.context_page.frames]:
+            locator = frame.locator(selector)
+            for index in range(await locator.count()):
+                candidate = locator.nth(index)
+                try:
+                    if await candidate.is_visible():
+                        await candidate.click(timeout=5000)
+                        return True
+                except Exception:
+                    continue
+        return False
+
+    async def _submit_sms_verification(self) -> bool:
+        """Click Douyin's verification control after filling the SMS code."""
+        selector = (
+            "button:text-is('验证'), [role='button']:text-is('验证'), "
+            "div:text-is('验证'), span:text-is('验证')"
+        )
+        for frame in [self.context_page, *self.context_page.frames]:
+            locator = frame.locator(selector)
+            for index in range(await locator.count()):
+                try:
+                    candidate = locator.nth(index)
+                    if await candidate.is_visible() and await candidate.is_enabled():
+                        await candidate.click(timeout=5000)
+                        return True
+                except Exception:
+                    continue
+        return False
+
+    async def _visible_identity_options(self):
+        options = (
+            ("receive_sms", "接收短信验证码"),
+            ("send_sms", "发送短信验证"),
+        )
+        visible = []
+        for frame in [self.context_page, *self.context_page.frames]:
+            for value, label in options:
+                locator = frame.locator(f"text={label}")
+                for index in range(await locator.count()):
+                    try:
+                        if await locator.nth(index).is_visible():
+                            visible.append({"value": value, "label": label})
+                            break
+                    except Exception:
+                        continue
+        return list({item["value"]: item for item in visible}.values())
+
+    async def _choose_identity_option(self, action: str) -> bool:
+        labels = {
+            "receive_sms": "接收短信验证码",
+            "send_sms": "发送短信验证",
+        }
+        label = labels.get(action)
+        if not label:
+            return False
+        for frame in [self.context_page, *self.context_page.frames]:
+            locator = frame.locator(f"text={label}")
+            for index in range(await locator.count()):
+                try:
+                    candidate = locator.nth(index)
+                    if await candidate.is_visible():
+                        await candidate.click(timeout=5000)
+                        return True
+                except Exception:
+                    continue
+        return False
+
+    async def _verification_choice_visible(self) -> bool:
+        selector = (
+            "button:has-text('验证码验证'), [role='button']:has-text('验证码验证'), "
+            "div[role='button']:has-text('验证码验证')"
+        )
+        for frame in [self.context_page, *self.context_page.frames]:
+            locator = frame.locator(selector)
+            for index in range(await locator.count()):
+                try:
+                    if await locator.nth(index).is_visible():
+                        return True
+                except Exception:
+                    continue
+        return False
+
+    async def wait_for_qrcode_login(self):
+        """Wait for QR completion and handle the optional SMS challenge."""
+        started_at = time.monotonic()
+        verification_announced = False
+        identity_announced = False
+        code_applied = ""
+        selected_action = ""
+        while time.monotonic() - started_at < 600:
+            if await self._has_login_state():
+                return
+
+            request = utils.read_login_verification_request()
+            requested_action = str(request.get("action") or "").strip()
+            if requested_action and requested_action != selected_action:
+                if await self._choose_identity_option(requested_action):
+                    selected_action = requested_action
+                    utils.clear_login_verification_code()
+                    utils.emit_login_verification("sms", "验证方式已选择，请输入抖音短信验证码")
+                    verification_announced = True
+
+            identity_options = await self._visible_identity_options()
+            sms_input = await self._visible_sms_input(allow_inactive=bool(selected_action))
+            page_text_parts = []
+            for frame in [self.context_page, *self.context_page.frames]:
+                try:
+                    page_text_parts.append(await frame.locator("body").inner_text(timeout=1000))
+                except Exception:
+                    continue
+            page_text = "\n".join(page_text_parts)
+            if identity_options and not selected_action:
+                if not identity_announced:
+                    utils.emit_login_verification(
+                        "identity",
+                        "抖音需要完成身份验证，请选择一种验证方式",
+                        identity_options,
+                    )
+                    utils.logger.info("[DouYinLogin.login_by_qrcode] Identity verification options are required")
+                    identity_announced = True
+                await asyncio.sleep(0.5)
+                continue
+
+            challenge_visible = bool(sms_input) or await self._verification_choice_visible() or any(
+                marker in page_text for marker in ("请输入验证码", "输入验证码", "短信验证码已发送", "验证手机号")
+            )
+            if challenge_visible:
+                choice_clicked = await self._choose_sms_verification()
+                sms_input = sms_input or await self._visible_sms_input(allow_inactive=bool(selected_action or choice_clicked))
+                if not sms_input and not choice_clicked and "验证手机号" not in page_text:
+                    await asyncio.sleep(0.5)
+                    continue
+                if not verification_announced:
+                    utils.emit_login_verification("sms", "抖音需要手机短信验证码，请在下方输入验证码")
+                    utils.logger.info("[DouYinLogin.login_by_qrcode] SMS verification is required; waiting for code from the workbench")
+                    verification_announced = True
+
+                code = utils.read_login_verification_code()
+                if code and code != code_applied and sms_input:
+                    await sms_input.fill(code)
+                    submitted = await self._submit_sms_verification()
+                    if not submitted:
+                        try:
+                            await sms_input.press("Enter")
+                            submitted = True
+                        except Exception:
+                            submitted = False
+                    utils.logger.info(
+                        f"[DouYinLogin.login_by_qrcode] SMS verification code filled; submit={'clicked' if submitted else 'not_found'}"
+                    )
+                    utils.clear_login_verification_code()
+                    code_applied = code
+                    await asyncio.sleep(1)
+                await asyncio.sleep(0.5)
+                continue
+            await asyncio.sleep(1)
 
     async def login_by_mobile(self):
         utils.logger.info("[DouYinLogin.login_by_mobile] Begin login douyin by mobile ...")

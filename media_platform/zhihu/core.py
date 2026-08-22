@@ -119,7 +119,17 @@ class ZhihuCrawler(AbstractCrawler):
                     urls=self.cookie_urls,
                 )
                 if not await self.zhihu_client.pong():
-                    raise RuntimeError("Zhihu login validation failed after login")
+                    # QR login is completed by the browser as soon as z_c0 is
+                    # issued.  The API can briefly reject /api/v4/me while
+                    # the new session propagates; keep the validated browser
+                    # session and let the first search request perform the
+                    # normal API retry instead of reporting a false login
+                    # failure.
+                    if self.zhihu_client.has_login_cookie():
+                        utils.logger.warning("[ZhihuCrawler.start] Zhihu API validation is temporarily unavailable; z_c0 cookie confirms login")
+                    else:
+                        raise RuntimeError("Zhihu login validation failed after login")
+            utils.emit_login_cookies(self.zhihu_client.default_headers.get("cookie", ""))
             if getattr(config, "LOGIN_ONLY", False):
                 utils.logger.info("[ZhihuCrawler.start] Login-only mode confirmed login state; skip crawling.")
                 return
@@ -136,6 +146,9 @@ class ZhihuCrawler(AbstractCrawler):
                 browser_context=self.browser_context,
                 urls=self.cookie_urls,
             )
+            # The search page can refresh Zhihu's session cookies. Persist the
+            # final validated header used by the crawler, not the pre-search one.
+            utils.emit_login_cookies(self.zhihu_client.default_headers.get("cookie", ""))
 
             crawler_type_var.set(config.CRAWLER_TYPE)
             if config.CRAWLER_TYPE == "search":

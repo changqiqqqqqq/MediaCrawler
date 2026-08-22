@@ -112,6 +112,7 @@ class BilibiliCrawler(AbstractCrawler):
                 )
                 if not await self.bili_client.pong():
                     raise RuntimeError("Bilibili login validation failed after login")
+            utils.emit_login_cookies(self.bili_client.headers.get("Cookie", ""))
             if getattr(config, "LOGIN_ONLY", False):
                 utils.logger.info("[BilibiliCrawler.start] Login-only mode confirmed login state; skip crawling.")
                 return

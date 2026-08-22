@@ -31,10 +31,22 @@ from typing import Optional
 import execjs
 from playwright.async_api import Page
 
+try:
+    import quickjs
+except ImportError:
+    quickjs = None
+
 from model.m_douyin import VideoUrlInfo, CreatorUrlInfo
 from tools.crawler_util import extract_url_params_to_dict
 
 douyin_sign_obj = execjs.compile(open('libs/douyin.js', encoding='utf-8-sig').read())
+douyin_quickjs_obj = None
+if quickjs is not None:
+    try:
+        douyin_quickjs_obj = quickjs.Context()
+        douyin_quickjs_obj.eval(open('libs/douyin.js', encoding='utf-8-sig').read())
+    except Exception:
+        douyin_quickjs_obj = None
 
 def get_web_id():
     """
@@ -60,9 +72,33 @@ def get_web_id():
 
 async def get_a_bogus(url: str, params: str, post_data: dict, user_agent: str, page: Page = None):
     """
-    Get a_bogus parameter, currently does not support POST request type signature
+    Get a_bogus parameter from the active Douyin page when available.  The
+    bundled JScript fallback is not compatible with all current Windows
+    runtimes, so a signing failure must not abort an otherwise authenticated
+    search request.
     """
-    return get_a_bogus_from_js(url, params, user_agent)
+    if page is not None:
+        try:
+            signed = await get_a_bogus_from_playwright(params, post_data, user_agent, page)
+            if signed:
+                return signed
+        except Exception:
+            pass
+    # QuickJS is cross-platform and supports the bundled signer.  Prefer it
+    # over PyExecJS here: on Windows without Node, PyExecJS silently selects
+    # the legacy JScript runtime, which raises a syntax error for this script.
+    if douyin_quickjs_obj is not None:
+        try:
+            sign_name = "sign_reply" if "/reply" in url else "sign_datail"
+            signed = douyin_quickjs_obj.get(sign_name)(params, user_agent)
+            if signed:
+                return str(signed)
+        except Exception:
+            pass
+    try:
+        return get_a_bogus_from_js(url, params, user_agent)
+    except Exception:
+        return ""
 
 def get_a_bogus_from_js(url: str, params: str, user_agent: str):
     """

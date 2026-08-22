@@ -19,11 +19,14 @@
 
 
 # -*- coding: utf-8 -*-
+import ast
+import hashlib
 import json
+import random
+import re
 from typing import Dict, List, Optional
 from urllib.parse import parse_qs, urlparse
 
-import execjs
 from parsel import Selector
 
 from constant import zhihu as zhihu_constant
@@ -33,6 +36,88 @@ from tools.crawler_util import extract_text_from_html
 from tools.user_hash import anonymize_user_id, mask_nickname
 
 ZHIHU_SGIN_JS = None
+_SIGN_CONSTANTS = None
+
+
+def _signed32(value: int) -> int:
+    value &= 0xFFFFFFFF
+    return value - 0x100000000 if value & 0x80000000 else value
+
+
+def _unsigned32(value: int) -> int:
+    return value & 0xFFFFFFFF
+
+
+def _load_sign_constants():
+    global _SIGN_CONSTANTS
+    if _SIGN_CONSTANTS is not None:
+        return _SIGN_CONSTANTS
+    js_path = __file__
+    js_file = __import__('pathlib').Path(js_path).resolve().parents[2] / "libs" / "zhihu.js"
+    source = js_file.read_text(encoding="utf-8-sig")
+    match = re.search(r"zk:\s*(\[.*?\]),\s*zb:\s*(\[.*?\])", source, re.S)
+    if not match:
+        raise RuntimeError("Zhihu signing constants are missing")
+    _SIGN_CONSTANTS = (ast.literal_eval(match.group(1)), ast.literal_eval(match.group(2)))
+    return _SIGN_CONSTANTS
+
+
+def _zhihu_sign_python(url: str, cookies: str) -> Dict:
+    """Compute Zhihu's request signature without requiring a JS runtime."""
+    zk, zb = _load_sign_constants()
+    init_str = "6fpLRqJO8M/c3jnYxFkUVC4ZIG12SiH=5v0mXDazWBTsuw7QetbKdoPyAl+hN9rgE"
+    dc0_match = re.search(r"(?:^|;)\s*d_c0=([^;]+)", cookies or "")
+    dc0 = dc0_match.group(1) if dc0_match else ""
+    tc = "3_2.0aR_sn77yn6O92wOB8hPZnQr0EMYxc4f18wNBUgpTQ6nxERFZfTY0-4Lm-h3_tufIwJS8gcxTgJS_AuPZNcXCTwxI78YxEM20s4PGDwN8gGcYAupMWufIoLVqr4gxrRPOI0cY7HL8qun9g93mFukyigcmebS_FwOYPRP0E4rZUrN9DDom3hnynAUMnAVPF_PhaueTFH9fQL39OCCqYTxfb0rfi9wfPhSM6vxGDJo_rBHpQGNmBBLqPJHK2_w8C9eTVMO9Z9NOrMtfhGH_DgpM-BNM1DOxScLG3gg1Hre1FCXKQcXKkrSL1r9GWDXMk8wqBLNmbRH96BtOFqVZ7UYG3gC8D9cMS7Y9UrHLVCLZPJO8_CL_6GNCOg_zhJS8PbXmGTcBpgxfkieOPhNfthtf2gC_qD3YOce8nCwG2uwBOqeMoML9NBC1xb9yk6SuJhHLK7SM6LVfCve_3vLKlqcL6TxL_UosDvHLxrHmWgxBQ8Xs"
+    md5_value = hashlib.md5(f"101_3_3.0+{url}+{dc0}+{tc}".encode()).hexdigest()
+
+    def rotate(value: int, bits: int) -> int:
+        unsigned = _unsigned32(value)
+        return _signed32((unsigned << bits) | (unsigned >> (32 - bits)))
+
+    def word_from_bytes(values, offset):
+        return _signed32((_unsigned32(values[offset]) << 24) | (values[offset + 1] << 16) | (values[offset + 2] << 8) | values[offset + 3])
+
+    def word_to_bytes(value):
+        unsigned = _unsigned32(value)
+        return [(unsigned >> 24) & 255, (unsigned >> 16) & 255, (unsigned >> 8) & 255, unsigned & 255]
+
+    def transform(value):
+        values = word_to_bytes(value)
+        substituted = [zb[b] for b in values]
+        word = word_from_bytes(substituted, 0)
+        return _signed32(word ^ rotate(word, 2) ^ rotate(word, 10) ^ rotate(word, 18) ^ rotate(word, 24))
+
+    def block(values):
+        words = [word_from_bytes(values, i) for i in range(0, 16, 4)] + [0] * 32
+        for index in range(32):
+            words[index + 4] = _signed32(words[index] ^ transform(_signed32(words[index + 1] ^ words[index + 2] ^ words[index + 3] ^ zk[index])))
+        output = []
+        for index in (35, 34, 33, 32):
+            output.extend(word_to_bytes(words[index]))
+        return output
+
+    offsets = [48, 53, 57, 48, 53, 51, 102, 55, 100, 49, 53, 101, 48, 49, 100, 55]
+    init = [ord(char) for char in md5_value]
+    init.insert(0, 0)
+    init.insert(0, random.randrange(127))
+    init.extend([14] * (48 - len(init)))
+    first_input = [((value ^ offsets[index]) ^ 42) for index, value in enumerate(init[:16])]
+    first = block(first_input)
+    transformed = []
+    state = first
+    for offset in range(0, 32, 16):
+        state = block([left ^ right for left, right in zip(init[16 + offset:32 + offset], state)])
+        transformed.extend(state)
+    encoded = first + transformed
+    for index in range(47, -1, -4):
+        encoded[index] ^= 58
+    encoded.reverse()
+    result = []
+    for index in range(0, len(encoded), 3):
+        value = encoded[index] | (encoded[index + 1] << 8) | (encoded[index + 2] << 16)
+        result.extend([(value >> shift) & 63 for shift in (0, 6, 12, 18)])
+    return {"x-zst-81": tc, "x-zse-96": "2.0_" + "".join(init_str[index] for index in result)}
 
 
 def sign(url: str, cookies: str) -> Dict:
@@ -45,12 +130,7 @@ def sign(url: str, cookies: str) -> Dict:
     Returns:
 
     """
-    global ZHIHU_SGIN_JS
-    if not ZHIHU_SGIN_JS:
-        with open("libs/zhihu.js", mode="r", encoding="utf-8-sig") as f:
-            ZHIHU_SGIN_JS = execjs.compile(f.read())
-
-    return ZHIHU_SGIN_JS.call("get_sign", url, cookies)
+    return _zhihu_sign_python(url, cookies)
 
 
 class ZhihuExtractor:

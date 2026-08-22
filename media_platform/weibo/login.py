@@ -85,9 +85,14 @@ class WeiboLogin(AbstractLogin):
     async def login_by_qrcode(self):
         """login weibo website and keep webdriver login state"""
         utils.logger.info("[WeiboLogin.login_by_qrcode] Begin login weibo by qrcode ...")
-        await self.context_page.goto(self.weibo_sso_login_url)
+        await self.context_page.goto(self.weibo_sso_login_url, wait_until="domcontentloaded")
+        await self.context_page.wait_for_timeout(1200)
         # find login qrcode
-        qrcode_img_selector = "xpath=//img[@class='w-full h-full']"
+        qrcode_img_selector = (
+            "img[src*='qr.weibo.cn'], "
+            "img.w-full.h-full, "
+            "img[class*='w-full'][class*='h-full']"
+        )
         base64_qrcode_img = await utils.find_login_qrcode(
             self.context_page,
             selector=qrcode_img_selector

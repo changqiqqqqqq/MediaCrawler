@@ -113,6 +113,7 @@ class KuaishouCrawler(AbstractCrawler):
                 )
                 if not await self.ks_client.pong():
                     raise RuntimeError("Kuaishou login validation failed after login")
+            utils.emit_login_cookies(self.ks_client.headers.get("Cookie", ""))
             if getattr(config, "LOGIN_ONLY", False):
                 utils.logger.info("[KuaishouCrawler.start] Login-only mode confirmed login state; skip crawling.")
                 return

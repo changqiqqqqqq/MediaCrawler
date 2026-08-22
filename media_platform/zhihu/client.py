@@ -177,6 +177,10 @@ class ZhiHuClient(AbstractApiClient, ProxyRefreshMixin):
         self.default_headers["cookie"] = cookie_str
         self.cookie_dict = cookie_dict
 
+    def has_login_cookie(self) -> bool:
+        """Return whether the browser has the cookie set by a QR login."""
+        return bool(str(self.cookie_dict.get("z_c0") or "").strip())
+
     async def get_current_user_info(self) -> Dict:
         """
         Get current logged-in user information

@@ -111,13 +111,14 @@ class DouYinClient(AbstractApiClient, ProxyRefreshMixin):
         params.update(common_params)
         query_string = urllib.parse.urlencode(params)
 
-        # 20240927 a-bogus update (JS version)
+        # 20240927 a-bogus update (JS version).  Douyin now validates the
+        # general-search endpoint as well; omitting this signature makes the
+        # request return an empty data array (often with ``invalid_app``).
         post_data = {}
         if request_method == "POST":
             post_data = params
-
-        if "/v1/web/general/search" not in uri:
-            a_bogus = await get_a_bogus(uri, query_string, post_data, headers["User-Agent"], self.playwright_page)
+        a_bogus = await get_a_bogus(uri, query_string, post_data, headers["User-Agent"], self.playwright_page)
+        if a_bogus:
             params["a_bogus"] = a_bogus
 
     async def request(self, method, url, **kwargs):
@@ -148,15 +149,22 @@ class DouYinClient(AbstractApiClient, ProxyRefreshMixin):
         return await self.request(method="POST", url=f"{self._host}{uri}", data=data, headers=headers)
 
     async def pong(self, browser_context: BrowserContext) -> bool:
-        local_storage = await self.playwright_page.evaluate("() => window.localStorage")
-        if local_storage.get("HasUserLogin", "") == "1":
-            return True
-
         _, cookie_dict = await utils.convert_browser_context_cookies(
             browser_context,
             urls=self.cookie_urls,
         )
-        return cookie_dict.get("LOGIN_STATUS") == "1"
+        # ``HasUserLogin`` is a client-side flag and can remain set after a
+        # verification dialog is dismissed.  Only session cookies prove that
+        # the web API can actually search on behalf of the account.
+        authenticated_cookie_names = {
+            "sessionid", "sessionid_ss", "sid_guard", "sid_tt",
+            "uid_tt", "uid_tt_ss", "login_status",
+        }
+        return any(
+            str(value or "").strip()
+            for name, value in cookie_dict.items()
+            if str(name or "").lower() in authenticated_cookie_names
+        )
 
     async def update_cookies(self, browser_context: BrowserContext, urls: Optional[list[str]] = None):
         cookie_str, cookie_dict = await utils.convert_browser_context_cookies(

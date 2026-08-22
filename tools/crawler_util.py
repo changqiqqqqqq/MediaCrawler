@@ -50,7 +50,16 @@ async def find_login_qrcode(page: Page, selector: str, timeout: int = 30000) -> 
             selector=selector,
             timeout=timeout,
         )
-        login_qrcode_img = str(await elements.get_property("src"))  # type: ignore
+        # ElementHandle.get_property() returns a JSHandle.  Converting that
+        # handle with str() produces an empty/non-image value on current
+        # Playwright releases, so QR login appeared to start but the host never
+        # received a usable image.  Read the DOM attribute first and only use
+        # the property as a compatibility fallback.
+        login_qrcode_img = await elements.get_attribute("src")  # type: ignore
+        if not login_qrcode_img:
+            source_handle = await elements.get_property("src")  # type: ignore
+            login_qrcode_img = await source_handle.json_value() if source_handle else ""
+        login_qrcode_img = str(login_qrcode_img or "").strip()
         if "http://" in login_qrcode_img or "https://" in login_qrcode_img:
             async with make_async_client(follow_redirects=True) as client:
                 utils.logger.info(f"[find_login_qrcode] get qrcode by url:{login_qrcode_img}")
@@ -112,6 +121,80 @@ def _write_login_qrcode_output(qr_code: str) -> None:
 def emit_login_qrcode(qr_code: str) -> None:
     """Publish a QR code to the embedding application without opening a viewer."""
     _write_login_qrcode_output(qr_code)
+
+
+def emit_login_cookies(cookie_header: str) -> None:
+    """Persist validated browser cookies for the embedding application's next job."""
+    output_path = os.getenv("MEDIA_CRAWLER_COOKIE_OUTPUT", "").strip()
+    cookie_header = str(cookie_header or "").strip()
+    if not output_path or not cookie_header:
+        return
+    try:
+        target = Path(output_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"cookies": cookie_header, "updated_at": time.time()}
+        temp_target = target.parent / f".{target.name}.tmp"
+        temp_target.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        temp_target.replace(target)
+    except Exception as exc:
+        utils.logger.warning(f"[emit_login_cookies] write session output failed: {exc}")
+
+
+def emit_login_verification(kind: str = "sms", message: str = "", options: list[dict[str, str]] | None = None) -> None:
+    """Publish a human verification step to the embedding application."""
+    output_path = os.getenv("MEDIA_CRAWLER_VERIFICATION_OUTPUT", "").strip()
+    if not output_path:
+        return
+    try:
+        target = Path(output_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "required": True,
+            "kind": str(kind or "sms"),
+            "message": str(message or "请输入手机短信验证码"),
+            "options": options if isinstance(options, list) else [],
+            "updated_at": time.time(),
+        }
+        temp_target = target.parent / f".{target.name}.tmp"
+        temp_target.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        temp_target.replace(target)
+    except Exception as exc:
+        utils.logger.warning(f"[emit_login_verification] write verification output failed: {exc}")
+
+
+def read_login_verification_code() -> str:
+    """Read a code submitted by the embedding application."""
+    input_path = os.getenv("MEDIA_CRAWLER_VERIFICATION_INPUT", "").strip()
+    if not input_path:
+        return ""
+    try:
+        payload = json.loads(Path(input_path).read_text(encoding="utf-8"))
+        code = str(payload.get("code") or "").strip()
+        return code if re.fullmatch(r"[0-9]{4,8}", code) else ""
+    except Exception:
+        return ""
+
+
+def read_login_verification_request() -> dict:
+    """Read an action or code submitted by the embedding application."""
+    input_path = os.getenv("MEDIA_CRAWLER_VERIFICATION_INPUT", "").strip()
+    if not input_path:
+        return {}
+    try:
+        payload = json.loads(Path(input_path).read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
+
+
+def clear_login_verification_code() -> None:
+    input_path = os.getenv("MEDIA_CRAWLER_VERIFICATION_INPUT", "").strip()
+    if not input_path:
+        return
+    try:
+        Path(input_path).unlink(missing_ok=True)
+    except Exception:
+        pass
 
 
 def show_qrcode(qr_code) -> None:  # type: ignore

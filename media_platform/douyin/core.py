@@ -20,6 +20,8 @@
 import asyncio
 import os
 import random
+import re
+import urllib.parse
 from asyncio import Task
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -113,6 +115,7 @@ class DouYinCrawler(AbstractCrawler):
                 )
                 if not await self.dy_client.pong(browser_context=self.browser_context):
                     raise RuntimeError("Douyin login validation failed after login")
+            utils.emit_login_cookies(self.dy_client.headers.get("Cookie", ""))
             if getattr(config, "LOGIN_ONLY", False):
                 utils.logger.info("[DouYinCrawler.start] Login-only mode confirmed login state; skip crawling.")
                 return
@@ -154,8 +157,17 @@ class DouYinCrawler(AbstractCrawler):
                         publish_time=PublishTimeType(config.PUBLISH_TIME_TYPE),
                         search_id=dy_search_id,
                     )
+                    if isinstance(posts_res, dict):
+                        utils.logger.info(
+                            f"[DouYinCrawler.search] response status={posts_res.get('status_code')} "
+                            f"keys={list(posts_res.keys())[:12]} "
+                            f"search_nil_info={posts_res.get('search_nil_info')}"
+                        )
                     if posts_res.get("data") is None or posts_res.get("data") == []:
                         utils.logger.info(f"[DouYinCrawler.search] search douyin keyword: {keyword}, page: {page} is empty,{posts_res.get('data')}`")
+                        fallback_count = await self.search_by_browser_page(keyword, config.CRAWLER_MAX_NOTES_COUNT - len(aweme_list))
+                        if fallback_count:
+                            utils.logger.info(f"[DouYinCrawler.search] browser search page fallback saved {fallback_count} items")
                         break
                 except DataFetchError:
                     utils.logger.error(f"[DouYinCrawler.search] search douyin keyword: {keyword} failed")
@@ -184,6 +196,80 @@ class DouYinCrawler(AbstractCrawler):
                 await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC)
                 utils.logger.info(f"[DouYinCrawler.search] Sleeping for {config.CRAWLER_MAX_SLEEP_SEC} seconds after page {page-1}")
             utils.logger.info(f"[DouYinCrawler.search] keyword:{keyword}, aweme_list:{aweme_list}")
+
+    async def search_by_browser_page(self, keyword: str, max_results: int) -> int:
+        """Extract rendered video cards when the JSON search endpoint is empty.
+
+        Douyin can return a successful HTTP response with status 2483 and no
+        ``data`` while the browser search page still contains result cards.
+        Keeping this fallback in the crawler preserves the normal JSONL store
+        and lets the host application use its existing normalization path.
+        """
+        if max_results <= 0:
+            return 0
+        search_url = (
+            "https://www.douyin.com/search/"
+            f"{urllib.parse.quote(str(keyword), safe='')}?aid=f594bbd9-a0e2-4651-9319-ebe3cb6298c1&type=general"
+        )
+        try:
+            await self.context_page.goto(search_url, wait_until="domcontentloaded", timeout=45000)
+            await self.context_page.wait_for_timeout(2500)
+            title = (await self.context_page.title()).strip()
+            cards = await self.context_page.evaluate(
+                """() => {
+                    const seen = new Set();
+                    const rows = [];
+                    for (const anchor of document.querySelectorAll('a[href*="/video/"]')) {
+                        const match = String(anchor.href || '').match(/\/video\/(\d+)/);
+                        if (!match || seen.has(match[1])) continue;
+                        seen.add(match[1]);
+                        let node = anchor.closest('article, li');
+                        if (!node) {
+                            node = anchor.parentElement;
+                            for (let i = 0; i < 5 && node && String(node.innerText || '').trim().length < 12; i += 1) {
+                                node = node.parentElement;
+                            }
+                        }
+                        const text = String(
+                            anchor.getAttribute('title') || anchor.innerText || (node && node.innerText) || ''
+                        ).replace(/\\s+/g, ' ').trim();
+                        const image = node && node.querySelector('img');
+                        rows.push({
+                            aweme_id: match[1],
+                            desc: text.slice(0, 500),
+                            cover_url: image ? String(image.currentSrc || image.src || '') : '',
+                            url: anchor.href,
+                        });
+                    }
+                    return rows;
+                }"""
+            )
+        except Exception as exc:
+            utils.logger.warning(f"[DouYinCrawler.search] browser search page fallback failed: {exc}")
+            return 0
+        if title in {"验证码中间页", "验证中间页"}:
+            utils.logger.warning("[DouYinCrawler.search] browser search page is a verification interstitial")
+        if not isinstance(cards, list):
+            return 0
+        saved = 0
+        source_keyword_var.set(keyword)
+        for item in cards[:max_results]:
+            if not isinstance(item, dict) or not item.get("aweme_id"):
+                continue
+            description = str(item.get("desc") or keyword).strip() or keyword
+            cover_url = str(item.get("cover_url") or "").strip()
+            aweme_item = {
+                "aweme_id": str(item["aweme_id"]),
+                "aweme_type": 0,
+                "desc": description,
+                "create_time": 0,
+                "author": {},
+                "statistics": {},
+                "video": {"raw_cover": {"url_list": [cover_url]}} if cover_url else {},
+            }
+            await douyin_store.update_douyin_aweme(aweme_item=aweme_item)
+            saved += 1
+        return saved
 
     async def get_specified_awemes(self):
         """Get the information and comments of the specified post from URLs or IDs"""
@@ -347,6 +433,7 @@ class DouYinCrawler(AbstractCrawler):
                 user_data_dir=user_data_dir,
                 accept_downloads=True,
                 headless=headless,
+                channel="chrome",
                 proxy=playwright_proxy,  # type: ignore
                 viewport={
                     "width": 1920,
@@ -356,7 +443,7 @@ class DouYinCrawler(AbstractCrawler):
             )  # type: ignore
             return browser_context
         else:
-            browser = await chromium.launch(headless=headless, proxy=playwright_proxy)  # type: ignore
+            browser = await chromium.launch(headless=headless, proxy=playwright_proxy, channel="chrome")  # type: ignore
             browser_context = await browser.new_context(viewport={"width": 1920, "height": 1080}, user_agent=user_agent)
             return browser_context
 

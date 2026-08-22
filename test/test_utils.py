@@ -20,11 +20,13 @@
 
 # -*- coding: utf-8 -*-
 
+import json
 from unittest.mock import AsyncMock
 
 import pytest
 
 from tools import utils
+from tools import crawler_util
 
 
 def test_convert_cookies():
@@ -47,3 +49,27 @@ async def test_convert_browser_context_cookies_uses_url_filter():
     browser_context.cookies.assert_awaited_once_with(urls=["https://www.douyin.com"])
     assert cookie_str == "sessionid=abc"
     assert cookie_dict == {"sessionid": "abc"}
+
+
+@pytest.mark.asyncio
+async def test_find_login_qrcode_reads_src_attribute():
+    page = AsyncMock()
+    element = AsyncMock()
+    element.get_attribute.return_value = "data:image/png;base64,QUJD"
+    page.wait_for_selector.return_value = element
+
+    value = await crawler_util.find_login_qrcode(page, ".login-qr img")
+
+    assert value == "data:image/png;base64,QUJD"
+    element.get_property.assert_not_awaited()
+
+
+def test_emit_login_cookies_writes_snapshot(tmp_path, monkeypatch):
+    output_path = tmp_path / "login_session.json"
+    monkeypatch.setenv("MEDIA_CRAWLER_COOKIE_OUTPUT", str(output_path))
+
+    crawler_util.emit_login_cookies("SESSDATA=sample; bili_jct=sample")
+
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    assert payload["cookies"] == "SESSDATA=sample; bili_jct=sample"
+    assert payload["updated_at"] > 0

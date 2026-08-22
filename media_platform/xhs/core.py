@@ -112,6 +112,7 @@ class XiaoHongShuCrawler(AbstractCrawler):
                 )
                 if not await self.xhs_client.pong():
                     raise RuntimeError("Xiaohongshu login validation failed after login")
+            utils.emit_login_cookies(self.xhs_client.headers.get("Cookie", ""))
 
             if getattr(config, "LOGIN_ONLY", False):
                 utils.logger.info("[XiaoHongShuCrawler.start] Login-only mode confirmed login state; skip crawling.")
@@ -414,6 +415,7 @@ class XiaoHongShuCrawler(AbstractCrawler):
                 user_data_dir=user_data_dir,
                 accept_downloads=True,
                 headless=headless,
+                channel="chrome",
                 proxy=playwright_proxy,  # type: ignore
                 viewport={
                     "width": 1920,
@@ -423,7 +425,7 @@ class XiaoHongShuCrawler(AbstractCrawler):
             )
             return browser_context
         else:
-            browser = await chromium.launch(headless=headless, proxy=playwright_proxy)  # type: ignore
+            browser = await chromium.launch(headless=headless, proxy=playwright_proxy, channel="chrome")  # type: ignore
             browser_context = await browser.new_context(viewport={"width": 1920, "height": 1080}, user_agent=user_agent)
             return browser_context
 
