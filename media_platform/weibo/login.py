@@ -24,6 +24,7 @@
 # @Desc    : Weibo login implementation
 
 import asyncio
+import base64
 import functools
 import sys
 from typing import Optional
@@ -87,6 +88,9 @@ class WeiboLogin(AbstractLogin):
         utils.logger.info("[WeiboLogin.login_by_qrcode] Begin login weibo by qrcode ...")
         await self.context_page.goto(self.weibo_sso_login_url, wait_until="domcontentloaded")
         await self.context_page.wait_for_timeout(1200)
+        utils.logger.info(
+            f"[WeiboLogin.login_by_qrcode] login page url={self.context_page.url} title={await self.context_page.title()}"
+        )
         # find login qrcode
         qrcode_img_selector = (
             "img[src*='qr.weibo.cn'], img[src*='qrcode'], img[src*='qr'], "
@@ -98,6 +102,29 @@ class WeiboLogin(AbstractLogin):
             self.context_page,
             selector=qrcode_img_selector
         )
+        # The SSO page has also rendered the QR panel inside an iframe. Try
+        # each frame and finally capture the iframe itself when it has no
+        # image src (for example, a canvas or CSS background QR).
+        if not base64_qrcode_img:
+            for frame in self.context_page.frames:
+                if frame == self.context_page.main_frame:
+                    continue
+                try:
+                    base64_qrcode_img = await utils.find_login_qrcode(
+                        frame, selector=qrcode_img_selector, timeout=5000
+                    )
+                    if base64_qrcode_img:
+                        break
+                except Exception:
+                    continue
+        if not base64_qrcode_img:
+            iframe_locator = self.context_page.locator("iframe").first
+            try:
+                if await iframe_locator.count() and await iframe_locator.is_visible():
+                    screenshot = await iframe_locator.screenshot()
+                    base64_qrcode_img = base64.b64encode(screenshot).decode("utf-8")
+            except Exception:
+                pass
         if not base64_qrcode_img:
             utils.logger.info("[WeiboLogin.login_by_qrcode] login failed , have not found qrcode please check ....")
             sys.exit()
