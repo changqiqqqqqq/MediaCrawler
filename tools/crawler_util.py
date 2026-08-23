@@ -67,14 +67,28 @@ async def find_login_qrcode(page: Page, selector: str, timeout: int = 30000) -> 
             screenshot = await elements.screenshot()  # type: ignore
             return base64.b64encode(screenshot).decode("utf-8")
         if "http://" in login_qrcode_img or "https://" in login_qrcode_img:
-            async with make_async_client(follow_redirects=True) as client:
-                utils.logger.info(f"[find_login_qrcode] get qrcode by url:{login_qrcode_img}")
-                resp = await client.get(login_qrcode_img, headers={"User-Agent": get_user_agent()})
-                if resp.status_code == 200:
-                    image_data = resp.content
-                    base64_image = base64.b64encode(image_data).decode('utf-8')
-                    return base64_image
-                raise Exception(f"fetch login image url failed, response message:{resp.text}")
+            try:
+                async with make_async_client(follow_redirects=True) as client:
+                    utils.logger.info(f"[find_login_qrcode] get qrcode by url:{login_qrcode_img}")
+                    resp = await client.get(login_qrcode_img, headers={"User-Agent": get_user_agent()})
+                    if resp.status_code == 200 and resp.content:
+                        image_data = resp.content
+                        base64_image = base64.b64encode(image_data).decode('utf-8')
+                        return base64_image
+                    utils.logger.warning(
+                        f"[find_login_qrcode] remote qrcode fetch returned {resp.status_code}; "
+                        "falling back to the browser-rendered image"
+                    )
+            except Exception as exc:
+                # Some platforms allow the browser to load the QR image but
+                # reject a second server-side HTTP request. The rendered DOM
+                # image is still a valid QR code, so capture it directly.
+                utils.logger.warning(
+                    f"[find_login_qrcode] remote qrcode fetch failed: {exc}; "
+                    "falling back to the browser-rendered image"
+                )
+            screenshot = await elements.screenshot()  # type: ignore
+            return base64.b64encode(screenshot).decode("utf-8")
         return login_qrcode_img
 
     except Exception as e:

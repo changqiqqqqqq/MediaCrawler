@@ -91,6 +91,16 @@ class WeiboLogin(AbstractLogin):
         utils.logger.info(
             f"[WeiboLogin.login_by_qrcode] login page url={self.context_page.url} title={await self.context_page.title()}"
         )
+        # The mobile user agent used by MediaCrawler opens Weibo's SMS form
+        # first. Switch to the QR tab before looking for the QR image.
+        try:
+            scan_login = self.context_page.get_by_text("扫码登录", exact=True).last
+            if await scan_login.count() and await scan_login.is_visible():
+                await scan_login.click(force=True)
+                await self.context_page.wait_for_timeout(1200)
+                utils.logger.info("[WeiboLogin.login_by_qrcode] switched to QR login tab")
+        except Exception as exc:
+            utils.logger.debug(f"[WeiboLogin.login_by_qrcode] QR tab switch skipped: {exc}")
         # find login qrcode
         qrcode_img_selector = (
             "img[src*='qr.weibo.cn'], img[src*='qrcode'], img[src*='qr'], "
@@ -100,8 +110,31 @@ class WeiboLogin(AbstractLogin):
         )
         base64_qrcode_img = await utils.find_login_qrcode(
             self.context_page,
-            selector=qrcode_img_selector
+            selector=qrcode_img_selector,
+            timeout=10000,
         )
+        # Weibo's current Vue page may attach the QR image after the initial
+        # selector query and may omit QR-related class names entirely. Inspect
+        # the rendered image list as a second pass and capture the image the
+        # browser already loaded.
+        if not base64_qrcode_img:
+            try:
+                image_locators = await self.context_page.locator("img").all()
+                utils.logger.info(
+                    f"[WeiboLogin.login_by_qrcode] rendered image count={len(image_locators)}"
+                )
+                for image in image_locators:
+                    src = (await image.get_attribute("src") or "").lower()
+                    alt = (await image.get_attribute("alt") or "").lower()
+                    classes = (await image.get_attribute("class") or "").lower()
+                    if any(token in f"{src} {alt} {classes}" for token in ("qr", "qrcode", "二维码")):
+                        screenshot = await image.screenshot()
+                        base64_qrcode_img = base64.b64encode(screenshot).decode("utf-8")
+                        break
+            except Exception as exc:
+                utils.logger.warning(
+                    f"[WeiboLogin.login_by_qrcode] rendered image fallback failed: {exc}"
+                )
         # The SSO page has also rendered the QR panel inside an iframe. Try
         # each frame and finally capture the iframe itself when it has no
         # image src (for example, a canvas or CSS background QR).

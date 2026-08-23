@@ -110,10 +110,16 @@ class XiaoHongShuLogin(AbstractLogin):
 
         # 1. Priority check: Check if the "Me" (Profile) node appears in the sidebar
         try:
-            # Selector for elements containing "Me" text with a link pointing to the profile
-            # XPath Explanation: Find a span with text "Me" inside an anchor tag (<a>) 
-            # whose href attribute contains "/user/profile/"
-            user_profile_selector = "a[href*='/user/profile']"
+            # The profile link exists in the logged-out shell as well. Require
+            # the visible profile label so the QR wait is not short-circuited
+            # before the user scans the code.
+            user_profile_selector = (
+                "xpath=//a[contains(@href, '/user/profile/')]["
+                ".//span[normalize-space()='我' or normalize-space()='我的' "
+                "or normalize-space()='Me'] or "
+                "contains(@aria-label, '我') or contains(@aria-label, 'Me')"
+                "]"
+            )
             
             # Set a short timeout since this is called within a retry loop
             is_visible = await self.context_page.is_visible(user_profile_selector, timeout=500)
