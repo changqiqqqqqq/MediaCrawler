@@ -238,7 +238,17 @@ class XiaoHongShuClient(AbstractApiClient, ProxyRefreshMixin):
         async with make_async_client(proxy=self.proxy) as client:
             response = await client.get(f"{self._host}{uri}", headers=headers)
             if response.status_code == 200:
-                return response.json()
+                payload = response.json()
+                if isinstance(payload, dict):
+                    data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+                    result = data.get("result") if isinstance(data.get("result"), dict) else {}
+                    utils.logger.info(
+                        "[XiaoHongShuClient.query_self] selfinfo payload "
+                        f"code={payload.get('code')} msg={payload.get('msg')} "
+                        f"data_keys={','.join(sorted(str(key) for key in data.keys()))} "
+                        f"result_keys={','.join(sorted(str(key) for key in result.keys()))}"
+                    )
+                return payload
             utils.logger.warning(
                 f"[XiaoHongShuClient.query_self] selfinfo http status={response.status_code} "
                 f"content_type={response.headers.get('content-type', '')}"

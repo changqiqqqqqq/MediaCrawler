@@ -57,6 +57,8 @@ class XiaoHongShuLogin(AbstractLogin):
         # after the QR confirmation, even when the browser page does not redirect.
         self.login_client = login_client
         self._last_api_check = 0.0
+        self._last_page_refresh = 0.0
+        self._login_started_at = time.monotonic()
 
     def _iter_context_pages(self) -> list[Page]:
         pages = [self.context_page]
@@ -148,6 +150,25 @@ class XiaoHongShuLogin(AbstractLogin):
         if current_web_session and current_web_session != no_logged_in_session:
             utils.logger.info("[XiaoHongShuLogin.check_login_state] Login status confirmed by Cookie (web_session changed).")
             return True
+
+        # The QR dialog's status polling can stall in a headless container.
+        # Reload the same page once after the confirmation window starts so the
+        # browser rehydrates any session cookie issued by the platform.
+        now_monotonic = time.monotonic()
+        if (
+            now_monotonic - self._login_started_at >= 8
+            and now_monotonic - self._last_page_refresh >= 15
+        ):
+            self._last_page_refresh = now_monotonic
+            try:
+                await self.context_page.reload(wait_until="domcontentloaded", timeout=15000)
+                utils.logger.info(
+                    "[XiaoHongShuLogin.check_login_state] Refreshed login page while waiting for QR confirmation."
+                )
+            except Exception as exc:
+                utils.logger.debug(
+                    f"[XiaoHongShuLogin.check_login_state] Login page refresh pending: {exc}"
+                )
 
         # Some server-side QR sessions keep the same page and cookie name after
         # confirmation. Refresh the API client's cookies and query selfinfo as a
