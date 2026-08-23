@@ -156,18 +156,38 @@ class DouYinLogin(AbstractLogin):
 
     async def login_by_qrcode(self):
         utils.logger.info("[DouYinLogin.login_by_qrcode] Begin login douyin by qrcode...")
-        qrcode_img_selector = (
-            "img[aria-label='二维码'], "
-            "#animate_qrcode_container img, "
+        qrcode_selectors = (
+            "img[aria-label='二维码'], #animate_qrcode_container img, "
             "#login-panel-new img[src^='data:image'], "
             "[class*='login-panel'] img, [class*='login-dialog'] img, "
-            "img[src*='qrcode'], img[aria-label*='二维码']"
+            "img[src*='qrcode'], img[aria-label*='二维码'], "
+            "#animate_qrcode_container canvas, [class*='qrcode'] canvas, "
+            "[class*='qr-code'] canvas, [class*='login-panel'] canvas, "
+            "[class*='login-dialog'] canvas, "
+            "[class*='qrcode'] svg, [class*='qr-code'] svg, canvas"
         )
-        base64_qrcode_img = await utils.find_login_qrcode(
-            self.context_page,
-            selector=qrcode_img_selector
-        )
+        base64_qrcode_img = ""
+        frames = [self.context_page, *self.context_page.frames]
+        for frame in frames:
+            try:
+                base64_qrcode_img = await utils.find_login_qrcode(
+                    frame,
+                    selector=qrcode_selectors,
+                    timeout=5000,
+                )
+                if base64_qrcode_img:
+                    break
+            except Exception:
+                continue
         if not base64_qrcode_img:
+            try:
+                utils.logger.info(
+                    "[DouYinLogin.login_by_qrcode] login qrcode not found; "
+                    f"title={await self.context_page.title()} url={self.context_page.url} "
+                    f"frames={len(self.context_page.frames)}"
+                )
+            except Exception:
+                pass
             utils.logger.info("[DouYinLogin.login_by_qrcode] login qrcode not found please confirm ...")
             sys.exit()
 
