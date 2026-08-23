@@ -111,7 +111,12 @@ class DouYinLogin(AbstractLogin):
 
     async def popup_login_dialog(self):
         """If the login dialog box does not pop up automatically, we will manually click the login button"""
-        dialog_selector = "xpath=//div[@id='login-panel-new']"
+        dialog_selectors = (
+            "#login-panel-new, [id*='login-panel'], [class*='login-panel'], "
+            "[class*='login-dialog'], [class*='qrcode'], "
+            "img[aria-label*='二维码'], img[src*='qrcode']"
+        )
+        dialog_selector = dialog_selectors
         dialog = self.context_page.locator(dialog_selector).first
         try:
             if await dialog.count() and await dialog.is_visible():
@@ -141,10 +146,12 @@ class DouYinLogin(AbstractLogin):
                 try:
                     login_button_ele = self.context_page.locator(selector).first
                     if await login_button_ele.is_visible():
-                        await login_button_ele.click(timeout=15000)
+                        await login_button_ele.click(timeout=15000, force=True)
                         break
                 except Exception:
                     continue
+            # The new Douyin dialog no longer has #login-panel-new. Wait for
+            # any login/QR container instead of requiring the legacy id.
             await self.context_page.wait_for_selector(dialog_selector, timeout=15000)
 
     async def login_by_qrcode(self):
@@ -152,7 +159,9 @@ class DouYinLogin(AbstractLogin):
         qrcode_img_selector = (
             "img[aria-label='二维码'], "
             "#animate_qrcode_container img, "
-            "#login-panel-new img[src^='data:image']"
+            "#login-panel-new img[src^='data:image'], "
+            "[class*='login-panel'] img, [class*='login-dialog'] img, "
+            "img[src*='qrcode'], img[aria-label*='二维码']"
         )
         base64_qrcode_img = await utils.find_login_qrcode(
             self.context_page,

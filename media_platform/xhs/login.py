@@ -73,7 +73,7 @@ class XiaoHongShuLogin(AbstractLogin):
         for page in self._iter_context_pages():
             try:
                 current_url = page.url or ""
-                if "/user/profile/" in current_url:
+                if "/user/profile" in current_url:
                     utils.logger.info(
                         f"[XiaoHongShuLogin.check_login_state] Login status confirmed by page URL: {current_url}"
                     )
@@ -113,7 +113,7 @@ class XiaoHongShuLogin(AbstractLogin):
             # Selector for elements containing "Me" text with a link pointing to the profile
             # XPath Explanation: Find a span with text "Me" inside an anchor tag (<a>) 
             # whose href attribute contains "/user/profile/"
-            user_profile_selector = "xpath=//a[contains(@href, '/user/profile/')][.//span[normalize-space()='我']]"
+            user_profile_selector = "a[href*='/user/profile']"
             
             # Set a short timeout since this is called within a retry loop
             is_visible = await self.context_page.is_visible(user_profile_selector, timeout=500)
@@ -259,7 +259,11 @@ class XiaoHongShuLogin(AbstractLogin):
         no_logged_in_session = cookie_dict.get("web_session")
 
         # login_selector = "div.login-container > div.left > div.qrcode > img"
-        qrcode_img_selector = "xpath=//img[@class='qrcode-img']"
+        qrcode_img_selector = (
+            "img[class*='qrcode-img'], "
+            "img[src*='qrcode'], img[src*='qr'], "
+            "img[alt*='二维码'], img[aria-label*='二维码'], canvas"
+        )
         # find login qrcode
         base64_qrcode_img = await utils.find_login_qrcode(
             self.context_page,

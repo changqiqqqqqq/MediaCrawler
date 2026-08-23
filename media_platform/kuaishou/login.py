@@ -80,10 +80,17 @@ class KuaishouLogin(AbstractLogin):
         login_button_ele = self.context_page.locator(
             "xpath=//p[text()='登录']"
         )
-        await login_button_ele.click()
+        # A consent/animation overlay can temporarily cover the text node.
+        # Force the click after confirming the entry exists so the QR dialog
+        # can still be opened on headless server pages.
+        await login_button_ele.click(force=True, timeout=15000)
 
         # find login qrcode
-        qrcode_img_selector = "//div[@class='qrcode-img']//img"
+        qrcode_img_selector = (
+            "div[class*='qrcode-img'] img, "
+            "img[src*='qr'], img[src*='qrcode'], "
+            "img[alt*='二维码'], img[aria-label*='二维码']"
+        )
         base64_qrcode_img = await utils.find_login_qrcode(
             self.context_page,
             selector=qrcode_img_selector
