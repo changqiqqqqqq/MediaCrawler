@@ -152,7 +152,20 @@ class DouYinLogin(AbstractLogin):
                     continue
             # The new Douyin dialog no longer has #login-panel-new. Wait for
             # any login/QR container instead of requiring the legacy id.
-            await self.context_page.wait_for_selector(dialog_selector, timeout=15000)
+            try:
+                await self.context_page.wait_for_selector(dialog_selector, timeout=15000)
+            except Exception as dialog_error:
+                # A/B tests and security interstitials may keep the login
+                # dialog out of the main DOM. Continue to the QR/frame scan so
+                # embedded dialogs can still be discovered.
+                try:
+                    utils.logger.info(
+                        "[DouYinLogin.popup_login_dialog] login dialog still not visible; "
+                        f"title={await self.context_page.title()} url={self.context_page.url} "
+                        f"frames={len(self.context_page.frames)} error={dialog_error}"
+                    )
+                except Exception:
+                    pass
 
     async def login_by_qrcode(self):
         utils.logger.info("[DouYinLogin.login_by_qrcode] Begin login douyin by qrcode...")
