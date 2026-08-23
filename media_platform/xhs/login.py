@@ -21,7 +21,8 @@
 import asyncio
 import functools
 import sys
-from typing import Optional
+import time
+from typing import Any, Optional
 
 from playwright.async_api import BrowserContext, Page
 from tenacity import (RetryError, retry, retry_if_result, stop_after_attempt,
@@ -44,13 +45,18 @@ class XiaoHongShuLogin(AbstractLogin):
                  browser_context: BrowserContext,
                  context_page: Page,
                  login_phone: Optional[str] = "",
-                 cookie_str: str = ""
+                 cookie_str: str = "",
+                 login_client: Optional[Any] = None,
                  ):
         config.LOGIN_TYPE = login_type
         self.browser_context = browser_context
         self.context_page = context_page
         self.login_phone = login_phone
         self.cookie_str = cookie_str
+        # The crawler client can validate the session through the platform API
+        # after the QR confirmation, even when the browser page does not redirect.
+        self.login_client = login_client
+        self._last_api_check = 0.0
 
     def _iter_context_pages(self) -> list[Page]:
         pages = [self.context_page]
@@ -142,6 +148,26 @@ class XiaoHongShuLogin(AbstractLogin):
         if current_web_session and current_web_session != no_logged_in_session:
             utils.logger.info("[XiaoHongShuLogin.check_login_state] Login status confirmed by Cookie (web_session changed).")
             return True
+
+        # Some server-side QR sessions keep the same page and cookie name after
+        # confirmation. Refresh the API client's cookies and query selfinfo as a
+        # fallback so headless deployments can observe the completed login.
+        if self.login_client and time.monotonic() - self._last_api_check >= 2:
+            self._last_api_check = time.monotonic()
+            try:
+                await self.login_client.update_cookies(
+                    browser_context=self.browser_context,
+                    urls=getattr(self.login_client, "cookie_urls", None),
+                )
+                if await self.login_client.pong():
+                    utils.logger.info(
+                        "[XiaoHongShuLogin.check_login_state] Login status confirmed by selfinfo API."
+                    )
+                    return True
+            except Exception as exc:
+                utils.logger.debug(
+                    f"[XiaoHongShuLogin.check_login_state] selfinfo API check pending: {exc}"
+                )
 
         return False
 

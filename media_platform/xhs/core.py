@@ -104,6 +104,7 @@ class XiaoHongShuCrawler(AbstractCrawler):
                     browser_context=self.browser_context,
                     context_page=self.context_page,
                     cookie_str=config.COOKIES,
+                    login_client=self.xhs_client,
                 )
                 await login_obj.begin()
                 await self.xhs_client.update_cookies(
