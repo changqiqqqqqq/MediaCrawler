@@ -239,6 +239,10 @@ class XiaoHongShuClient(AbstractApiClient, ProxyRefreshMixin):
             response = await client.get(f"{self._host}{uri}", headers=headers)
             if response.status_code == 200:
                 return response.json()
+            utils.logger.warning(
+                f"[XiaoHongShuClient.query_self] selfinfo http status={response.status_code} "
+                f"content_type={response.headers.get('content-type', '')}"
+            )
         return None
 
     async def pong(self) -> bool:
