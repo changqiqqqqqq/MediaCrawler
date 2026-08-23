@@ -264,6 +264,7 @@ class XiaoHongShuClient(AbstractApiClient, ProxyRefreshMixin):
                 )
                 explicit_result_failure = isinstance(result, dict) and result.get("success") is False
                 top_level_success = self_info.get("success") is True
+                explicit_top_failure = self_info.get("success") is False
                 user_record = isinstance(data, dict) and any(
                     data.get(key) for key in ("user_id", "userId", "nickname", "nick_name")
                 )
@@ -271,6 +272,7 @@ class XiaoHongShuClient(AbstractApiClient, ProxyRefreshMixin):
                 # an anonymous response, so require a user record with it.
                 ping_flag = bool(
                     not explicit_result_failure
+                    and not explicit_top_failure
                     and (result_success or (top_level_success and user_record) or user_record)
                 )
                 utils.logger.info(
