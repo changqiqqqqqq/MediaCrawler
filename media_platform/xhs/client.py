@@ -251,8 +251,33 @@ class XiaoHongShuClient(AbstractApiClient, ProxyRefreshMixin):
         ping_flag = False
         try:
             self_info: Dict = await self.query_self()
-            if self_info and self_info.get("data", {}).get("result", {}).get("success"):
-                ping_flag = True
+            if self_info:
+                data = self_info.get("data") if isinstance(self_info, dict) else None
+                result = data.get("result") if isinstance(data, dict) else None
+                # The self-info endpoint has returned both the legacy
+                # data.result.success shape and a top-level success shape.
+                # Accept either explicit success signal, plus a populated
+                # user record, while keeping an explicit false result rejected.
+                result_success = (
+                    result is True
+                    or (isinstance(result, dict) and result.get("success") is True)
+                )
+                explicit_result_failure = isinstance(result, dict) and result.get("success") is False
+                top_level_success = self_info.get("success") is True
+                user_record = isinstance(data, dict) and any(
+                    data.get(key) for key in ("user_id", "userId", "nickname", "nick_name")
+                )
+                # A top-level HTTP/business success can also be returned for
+                # an anonymous response, so require a user record with it.
+                ping_flag = bool(
+                    not explicit_result_failure
+                    and (result_success or (top_level_success and user_record) or user_record)
+                )
+                utils.logger.info(
+                    "[XiaoHongShuClient.pong] selfinfo response "
+                    f"http=200 top_success={top_level_success} "
+                    f"result_success={result_success} user_record={user_record}"
+                )
         except Exception as e:
             utils.logger.error(
                 f"[XiaoHongShuClient.pong] Check login state failed: {e}, and try to login again..."
