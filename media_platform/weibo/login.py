@@ -92,7 +92,7 @@ class WeiboLogin(AbstractLogin):
             "img[src*='qr.weibo.cn'], img[src*='qrcode'], img[src*='qr'], "
             "img[alt*='二维码'], img[aria-label*='二维码'], "
             "img.w-full.h-full, img[class*='w-full'][class*='h-full'], "
-            "canvas"
+            "canvas, svg[class*='qr'], [class*='qrcode'], [class*='qr-code']"
         )
         base64_qrcode_img = await utils.find_login_qrcode(
             self.context_page,

@@ -60,6 +60,12 @@ async def find_login_qrcode(page: Page, selector: str, timeout: int = 30000) -> 
             source_handle = await elements.get_property("src")  # type: ignore
             login_qrcode_img = await source_handle.json_value() if source_handle else ""
         login_qrcode_img = str(login_qrcode_img or "").strip()
+        # Several current login pages render the QR code as a canvas, SVG, or
+        # a background image rather than an <img src>.  Capture the matched
+        # element so the host still receives a usable PNG in those cases.
+        if not login_qrcode_img:
+            screenshot = await elements.screenshot()  # type: ignore
+            return base64.b64encode(screenshot).decode("utf-8")
         if "http://" in login_qrcode_img or "https://" in login_qrcode_img:
             async with make_async_client(follow_redirects=True) as client:
                 utils.logger.info(f"[find_login_qrcode] get qrcode by url:{login_qrcode_img}")
