@@ -177,7 +177,7 @@ class DouYinLogin(AbstractLogin):
             "#animate_qrcode_container canvas, [class*='qrcode'] canvas, "
             "[class*='qr-code'] canvas, [class*='login-panel'] canvas, "
             "[class*='login-dialog'] canvas, "
-            "[class*='qrcode'] svg, [class*='qr-code'] svg, canvas"
+            "[class*='qrcode'] svg, [class*='qr-code'] svg"
         )
         base64_qrcode_img = ""
         frames = [self.context_page, *self.context_page.frames]

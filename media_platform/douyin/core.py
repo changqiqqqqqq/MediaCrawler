@@ -97,7 +97,17 @@ class DouYinCrawler(AbstractCrawler):
                 await self.browser_context.add_init_script(path="libs/stealth.min.js")
 
             self.context_page = await self.browser_context.new_page()
-            await self.context_page.goto(self.index_url)
+            # The public Douyin home page frequently serves a verification
+            # interstitial to headless browsers before its login dialog can
+            # render.  The creator center exposes the same QR login flow
+            # directly and remains on the shared .douyin.com cookie scope.
+            login_url = (
+                "https://creator.douyin.com/"
+                if getattr(config, "LOGIN_ONLY", False)
+                and config.LOGIN_TYPE == "qrcode"
+                else self.index_url
+            )
+            await self.context_page.goto(login_url)
 
             self.dy_client = await self.create_douyin_client(httpx_proxy_format)
             if not await self.dy_client.pong(browser_context=self.browser_context):
