@@ -59,6 +59,8 @@ class XiaoHongShuLogin(AbstractLogin):
         self._last_api_check = 0.0
         self._last_page_refresh = 0.0
         self._login_started_at = time.monotonic()
+        self._verification_announced = False
+        self._verification_code_applied = ""
 
     def _iter_context_pages(self) -> list[Page]:
         pages = [self.context_page]
@@ -137,7 +139,10 @@ class XiaoHongShuLogin(AbstractLogin):
         except Exception:
             pass
 
-        # 2. Alternative: Check for CAPTCHA prompt
+        # 2. Handle a post-QR SMS challenge through the host UI.
+        await self._handle_sms_verification()
+
+        # 3. Alternative: Check for CAPTCHA prompt
         if "请通过验证" in await self.context_page.content():
             utils.logger.info("[XiaoHongShuLogin.check_login_state] CAPTCHA appeared, please verify manually.")
 
@@ -150,25 +155,6 @@ class XiaoHongShuLogin(AbstractLogin):
         if current_web_session and current_web_session != no_logged_in_session:
             utils.logger.info("[XiaoHongShuLogin.check_login_state] Login status confirmed by Cookie (web_session changed).")
             return True
-
-        # The QR dialog's status polling can stall in a headless container.
-        # Reload the same page once after the confirmation window starts so the
-        # browser rehydrates any session cookie issued by the platform.
-        now_monotonic = time.monotonic()
-        if (
-            now_monotonic - self._login_started_at >= 8
-            and now_monotonic - self._last_page_refresh >= 15
-        ):
-            self._last_page_refresh = now_monotonic
-            try:
-                await self.context_page.reload(wait_until="domcontentloaded", timeout=15000)
-                utils.logger.info(
-                    "[XiaoHongShuLogin.check_login_state] Refreshed login page while waiting for QR confirmation."
-                )
-            except Exception as exc:
-                utils.logger.debug(
-                    f"[XiaoHongShuLogin.check_login_state] Login page refresh pending: {exc}"
-                )
 
         # Some server-side QR sessions keep the same page and cookie name after
         # confirmation. Refresh the API client's cookies and query selfinfo as a
@@ -191,6 +177,67 @@ class XiaoHongShuLogin(AbstractLogin):
                 )
 
         return False
+
+    async def _visible_sms_input(self):
+        selectors = (
+            "input[placeholder*='验证码']", "input[placeholder*='验证']",
+            "input[name*='code']",
+        )
+        for page in self._iter_context_pages():
+            for selector in selectors:
+                try:
+                    locator = page.locator(selector)
+                    for index in range(await locator.count()):
+                        candidate = locator.nth(index)
+                        if await candidate.is_visible():
+                            return candidate
+                except Exception:
+                    continue
+        return None
+
+    async def _submit_sms_code(self, input_locator) -> bool:
+        for page in self._iter_context_pages():
+            try:
+                buttons = page.locator("button, [role='button']")
+                for index in range(min(await buttons.count(), 80)):
+                    button = buttons.nth(index)
+                    if not await button.is_visible():
+                        continue
+                    if (await button.inner_text()).strip() in {"确认", "确定", "登录", "提交", "验证"}:
+                        await button.click(timeout=1500)
+                        return True
+            except Exception:
+                continue
+        try:
+            await input_locator.press("Enter")
+            return True
+        except Exception:
+            return False
+
+    async def _handle_sms_verification(self) -> bool:
+        input_locator = await self._visible_sms_input()
+        page_text = ""
+        for page in self._iter_context_pages():
+            try:
+                page_text += "\n" + await page.locator("body").inner_text(timeout=800)
+            except Exception:
+                continue
+        challenge = any(
+            marker in page_text for marker in ("请输入验证码", "短信验证码", "验证码已发送", "验证手机号", "安全验证")
+        ) or input_locator is not None and any(marker in page_text for marker in ("验证码", "验证"))
+        if not challenge:
+            return False
+        if not self._verification_announced:
+            utils.emit_login_verification("sms", "小红书需要手机短信验证码，请在下方输入验证码")
+            utils.logger.info("[XiaoHongShuLogin] SMS verification is required; waiting for code from the workbench")
+            self._verification_announced = True
+        code = utils.read_login_verification_code()
+        if code and code != self._verification_code_applied and input_locator is not None:
+            await input_locator.fill(code)
+            self._verification_code_applied = code
+            await self._submit_sms_code(input_locator)
+            utils.clear_login_verification_code()
+        return True
 
     async def begin(self):
         """Start login xiaohongshu"""
@@ -312,10 +359,15 @@ class XiaoHongShuLogin(AbstractLogin):
         no_logged_in_session = cookie_dict.get("web_session")
 
         # login_selector = "div.login-container > div.left > div.qrcode > img"
+        # Keep this selector narrow. Generic `img[src*='qr']` and `canvas`
+        # selectors also match avatars and note media, which made the host
+        # replace a valid login QR with unrelated images every few seconds.
         qrcode_img_selector = (
             "img[class*='qrcode-img'], "
-            "img[src*='qrcode'], img[src*='qr'], "
-            "img[alt*='二维码'], img[aria-label*='二维码'], canvas"
+            "img[src*='qrcode'], img[src*='qr_code'], "
+            "img[alt*='二维码'], img[aria-label*='二维码'], "
+            "[class*='qrcode'] canvas, [class*='qr-code'] canvas, "
+            "[class*='qrcode'] svg, [class*='qr-code'] svg"
         )
         # find login qrcode
         base64_qrcode_img = await utils.find_login_qrcode(
