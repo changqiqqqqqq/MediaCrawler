@@ -412,11 +412,12 @@ class XiaoHongShuCrawler(AbstractCrawler):
             # feat issue #14
             # we will save login state to avoid login every time
             user_data_dir = os.path.join(os.getcwd(), "browser_data", config.USER_DATA_DIR % config.PLATFORM)  # type: ignore
+            browser_channel = "chromium" if headless else ("chrome" if os.name == "nt" else None)
             browser_context = await chromium.launch_persistent_context(
                 user_data_dir=user_data_dir,
                 accept_downloads=True,
                 headless=headless,
-                channel="chrome" if os.name == "nt" else None,
+                channel=browser_channel,
                 proxy=playwright_proxy,  # type: ignore
                 viewport={
                     "width": 1920,
@@ -426,7 +427,8 @@ class XiaoHongShuCrawler(AbstractCrawler):
             )
             return browser_context
         else:
-            browser = await chromium.launch(headless=headless, proxy=playwright_proxy, channel="chrome" if os.name == "nt" else None)  # type: ignore
+            browser_channel = "chromium" if headless else ("chrome" if os.name == "nt" else None)
+            browser = await chromium.launch(headless=headless, proxy=playwright_proxy, channel=browser_channel)  # type: ignore
             browser_context = await browser.new_context(viewport={"width": 1920, "height": 1080}, user_agent=user_agent)
             return browser_context
 
