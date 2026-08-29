@@ -91,19 +91,46 @@ class XiaoHongShuLogin(AbstractLogin):
             return
         self._diagnostic_hooks_attached = True
 
+        async def enrich_response(response: Any, event: dict[str, Any]) -> None:
+            try:
+                payload = await response.json()
+                if not isinstance(payload, dict):
+                    return
+                summary = {
+                    key: payload.get(key)
+                    for key in ("code", "status", "success", "msg", "message", "error_code", "error_msg")
+                    if key in payload
+                }
+                nested = payload.get("data")
+                if isinstance(nested, dict):
+                    summary["data"] = {
+                        key: nested.get(key)
+                        for key in ("code", "status", "success", "msg", "message", "error_code", "error_msg")
+                        if key in nested
+                    }
+                event["payload"] = summary
+            except Exception:
+                pass
+
         def record_response(response: Any) -> None:
             try:
                 url = str(response.url or "")
                 lowered = url.lower()
                 if not any(marker in lowered for marker in ("xiaohongshu", "xhs", "login", "selfinfo", "passport", "qr")):
                     return
-                self._diagnostic_events.append({
+                event: dict[str, Any] = {
                     "kind": "response",
                     "status": int(response.status),
                     "method": str(response.request.method or ""),
                     "url": self._diagnostic_url(url),
-                })
+                }
+                self._diagnostic_events.append(event)
                 del self._diagnostic_events[:-120]
+                if "/api/redcaptcha/v2/qr/status/query" in lowered:
+                    try:
+                        asyncio.create_task(enrich_response(response, event))
+                    except Exception:
+                        pass
             except Exception:
                 pass
 
