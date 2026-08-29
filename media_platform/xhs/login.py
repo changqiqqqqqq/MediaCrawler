@@ -363,9 +363,15 @@ class XiaoHongShuLogin(AbstractLogin):
                 page_text += "\n" + await page.locator("body").inner_text(timeout=800)
             except Exception:
                 continue
-        challenge = any(
-            marker in page_text for marker in ("请输入验证码", "短信验证码", "验证码已发送", "验证手机号", "安全验证")
-        ) or input_locator is not None and any(marker in page_text for marker in ("验证码", "验证"))
+        challenge_markers = ("请输入验证码", "短信验证码", "验证码已发送", "验证手机号", "安全验证")
+        # The QR dialog keeps a hidden phone form and the tab label
+        # "验证码登录" in the DOM. Do not treat those generic words as an
+        # active SMS challenge before the user has scanned the QR code.
+        challenge = any(marker in page_text for marker in challenge_markers)
+        if input_locator is not None and any(
+            marker in page_text for marker in ("短信验证码", "验证码已发送", "验证手机号", "请输入验证码", "安全验证")
+        ):
+            challenge = True
         if not challenge:
             return False
         if not self._verification_announced:

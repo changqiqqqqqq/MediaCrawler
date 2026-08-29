@@ -111,7 +111,19 @@ class XiaoHongShuCrawler(AbstractCrawler):
                     browser_context=self.browser_context,
                     urls=self.cookie_urls,
                 )
-                if not await self.xhs_client.pong():
+                # The QR callback can update browser cookies before the
+                # selfinfo endpoint accepts the new session. Give the API a
+                # short grace window instead of failing on the first poll.
+                validated = False
+                for attempt in range(1, 16):
+                    if await self.xhs_client.pong():
+                        validated = True
+                        break
+                    utils.logger.info(
+                        f"[XiaoHongShuCrawler.start] Login API validation pending ({attempt}/15)"
+                    )
+                    await asyncio.sleep(2)
+                if not validated:
                     try:
                         await login_obj._save_login_diagnostics(
                             "post-login-validation-failed",
