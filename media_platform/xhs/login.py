@@ -521,21 +521,30 @@ class XiaoHongShuLogin(AbstractLogin):
         utils.logger.info(f"[XiaoHongShuLogin.login_by_mobile] Login successful then wait for {wait_redirect_seconds} seconds redirect ...")
         await asyncio.sleep(wait_redirect_seconds)
 
-    async def _refresh_login_qrcode(self, selector: str, initial_qrcode: str) -> None:
+    async def _find_login_qrcode(self, selectors: tuple[str, ...], timeout: int = 5000) -> str:
+        """Return the first visible QR, preferring the security-verification modal."""
+        per_selector_timeout = max(500, timeout // max(1, len(selectors)))
+        for selector in selectors:
+            try:
+                value = await utils.find_login_qrcode(
+                    self.context_page,
+                    selector=selector,
+                    timeout=per_selector_timeout,
+                )
+                if value:
+                    return value
+            except Exception:
+                continue
+        return ""
+
+    async def _refresh_login_qrcode(self, selectors: tuple[str, ...], initial_qrcode: str) -> None:
         current_qrcode = initial_qrcode
         while True:
             await asyncio.sleep(2)
             try:
                 if await self._has_logged_in_page():
                     return
-                qrcode_locator = self.context_page.locator(selector).first
-                if await qrcode_locator.count() == 0:
-                    continue
-                next_qrcode = await utils.find_login_qrcode(
-                    self.context_page,
-                    selector=selector,
-                    timeout=1500,
-                )
+                next_qrcode = await self._find_login_qrcode(selectors, timeout=3000)
                 if next_qrcode and next_qrcode != current_qrcode:
                     utils.emit_login_qrcode(next_qrcode)
                     current_qrcode = next_qrcode
@@ -561,28 +570,24 @@ class XiaoHongShuLogin(AbstractLogin):
         # Keep this selector narrow. Generic `img[src*='qr']` and `canvas`
         # selectors also match avatars and note media, which made the host
         # replace a valid login QR with unrelated images every few seconds.
-        qrcode_img_selector = (
+        qrcode_img_selectors = (
+            # Once the main QR is scanned, XHS can place a second security QR
+            # in this modal. It must take priority over the scanned QR behind it.
+            "[id^='fe-captcha-container'] .r-captcha-modal .qrcode-img",
+            "[id^='fe-captcha-container'] .qrcode-img",
             "img[class*='qrcode-img'], "
             "img[src*='qrcode'], img[src*='qr_code'], "
             "img[alt*='二维码'], img[aria-label*='二维码'], "
             "[class*='qrcode'] canvas, [class*='qr-code'] canvas, "
-            "[class*='qrcode'] svg, [class*='qr-code'] svg"
+            "[class*='qrcode'] svg, [class*='qr-code'] svg",
         )
         # find login qrcode
-        base64_qrcode_img = await utils.find_login_qrcode(
-            self.context_page,
-            selector=qrcode_img_selector,
-            timeout=5000,
-        )
+        base64_qrcode_img = await self._find_login_qrcode(qrcode_img_selectors, timeout=5000)
         if not base64_qrcode_img:
             utils.logger.info("[XiaoHongShuLogin.login_by_qrcode] QR code not found automatically, trying to open login dialog ...")
             await asyncio.sleep(0.5)
             await self._try_open_login_dialog()
-            base64_qrcode_img = await utils.find_login_qrcode(
-                self.context_page,
-                selector=qrcode_img_selector,
-                timeout=10000,
-            )
+            base64_qrcode_img = await self._find_login_qrcode(qrcode_img_selectors, timeout=10000)
             if not base64_qrcode_img:
                 utils.logger.info("[XiaoHongShuLogin.login_by_qrcode] QR code still not found; keep browser open for manual login.")
                 await self._save_login_diagnostics("qrcode-not-found", "小红书登录页未找到二维码")
@@ -592,7 +597,7 @@ class XiaoHongShuLogin(AbstractLogin):
             partial_show_qrcode = functools.partial(utils.show_qrcode, base64_qrcode_img)
             asyncio.get_running_loop().run_in_executor(executor=None, func=partial_show_qrcode)
 
-        qrcode_refresh_task = asyncio.create_task(self._refresh_login_qrcode(qrcode_img_selector, base64_qrcode_img))
+        qrcode_refresh_task = asyncio.create_task(self._refresh_login_qrcode(qrcode_img_selectors, base64_qrcode_img))
         utils.logger.info(f"[XiaoHongShuLogin.login_by_qrcode] waiting for scan code login, remaining time is 120s")
         try:
             await self.check_login_state(no_logged_in_session)
