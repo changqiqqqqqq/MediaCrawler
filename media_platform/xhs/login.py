@@ -67,6 +67,9 @@ class XiaoHongShuLogin(AbstractLogin):
         self._verification_code_applied = ""
         self._diagnostic_events: list[dict[str, Any]] = []
         self._diagnostic_hooks_attached = False
+        self._qr_status: int | str | None = None
+        self._qr_confirmed = False
+        self._qr_failure_message = ""
 
     def _diagnostic_root(self) -> Path:
         configured = str(os.getenv("MEDIA_CRAWLER_DIAGNOSTIC_OUTPUT") or "").strip()
@@ -108,6 +111,17 @@ class XiaoHongShuLogin(AbstractLogin):
                         for key in ("code", "status", "success", "msg", "message", "error_code", "error_msg")
                         if key in nested
                     }
+                    qr_status = nested.get("status")
+                else:
+                    qr_status = payload.get("status")
+                if "/api/redcaptcha/v2/qr/status/query" in str(response.url or "").lower():
+                    self._qr_status = qr_status
+                    if str(qr_status).upper() in {"4", "CONFIRM"}:
+                        self._qr_confirmed = True
+                    elif str(qr_status).upper() in {"5", "6", "EXPIRE", "FAIL"}:
+                        self._qr_failure_message = str(
+                            nested.get("msg") if isinstance(nested, dict) else payload.get("msg") or "二维码状态已失效"
+                        )
                 event["payload"] = summary
             except Exception:
                 pass
@@ -168,6 +182,9 @@ class XiaoHongShuLogin(AbstractLogin):
             "reason": str(reason or ""),
             "saved_at": time.time(),
             "events": self._diagnostic_events[-120:],
+            "qr_status": self._qr_status,
+            "qr_confirmed": self._qr_confirmed,
+            "qr_failure_message": self._qr_failure_message,
             "pages": [],
         }
         try:
@@ -283,6 +300,12 @@ class XiaoHongShuLogin(AbstractLogin):
         """
         Verify login status using dual-check: UI elements and Cookies.
         """
+        if self._qr_confirmed:
+            utils.logger.info(
+                "[XiaoHongShuLogin.check_login_state] QR confirmation received from platform status API."
+            )
+            return True
+
         if await self._has_logged_in_page():
             return True
 
@@ -575,7 +598,10 @@ class XiaoHongShuLogin(AbstractLogin):
             await self.check_login_state(no_logged_in_session)
         except RetryError:
             utils.logger.info("[XiaoHongShuLogin.login_by_qrcode] Login xiaohongshu failed by qrcode login method ...")
-            await self._save_login_diagnostics("qrcode-login-failed", "二维码扫码后登录状态确认超时")
+            await self._save_login_diagnostics(
+                "qrcode-login-failed",
+                self._qr_failure_message or "二维码扫码后登录状态确认超时",
+            )
             sys.exit()
         finally:
             qrcode_refresh_task.cancel()
