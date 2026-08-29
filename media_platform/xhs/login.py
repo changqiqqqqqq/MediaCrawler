@@ -20,9 +20,13 @@
 
 import asyncio
 import functools
+import json
+import os
 import sys
 import time
+from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import urlparse, urlunparse
 
 from playwright.async_api import BrowserContext, Page
 from tenacity import (RetryError, retry, retry_if_result, stop_after_attempt,
@@ -61,6 +65,143 @@ class XiaoHongShuLogin(AbstractLogin):
         self._login_started_at = time.monotonic()
         self._verification_announced = False
         self._verification_code_applied = ""
+        self._diagnostic_events: list[dict[str, Any]] = []
+        self._diagnostic_hooks_attached = False
+
+    def _diagnostic_root(self) -> Path:
+        configured = str(os.getenv("MEDIA_CRAWLER_DIAGNOSTIC_OUTPUT") or "").strip()
+        if configured:
+            return Path(configured)
+        qrcode_output = str(os.getenv("MEDIA_CRAWLER_QRCODE_OUTPUT") or "").strip()
+        return Path(qrcode_output).parent / "browser_diagnostics" if qrcode_output else Path.cwd() / "browser_diagnostics"
+
+    @staticmethod
+    def _diagnostic_url(value: Any) -> str:
+        raw = str(value or "")
+        try:
+            parsed = urlparse(raw)
+            if parsed.scheme and parsed.netloc:
+                return urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))[:500]
+        except Exception:
+            pass
+        return raw[:500]
+
+    def _attach_diagnostic_hooks(self) -> None:
+        if self._diagnostic_hooks_attached:
+            return
+        self._diagnostic_hooks_attached = True
+
+        def record_response(response: Any) -> None:
+            try:
+                url = str(response.url or "")
+                lowered = url.lower()
+                if not any(marker in lowered for marker in ("xiaohongshu", "xhs", "login", "selfinfo", "passport", "qr")):
+                    return
+                self._diagnostic_events.append({
+                    "kind": "response",
+                    "status": int(response.status),
+                    "method": str(response.request.method or ""),
+                    "url": self._diagnostic_url(url),
+                })
+                del self._diagnostic_events[:-120]
+            except Exception:
+                pass
+
+        def record_request_failed(request: Any) -> None:
+            try:
+                url = str(request.url or "")
+                self._diagnostic_events.append({
+                    "kind": "request_failed",
+                    "method": str(request.method or ""),
+                    "url": self._diagnostic_url(url),
+                    "error": str(request.failure or "")[:300],
+                })
+                del self._diagnostic_events[:-120]
+            except Exception:
+                pass
+
+        try:
+            self.context_page.on("response", record_response)
+            self.context_page.on("requestfailed", record_request_failed)
+        except Exception:
+            pass
+
+    async def _save_login_diagnostics(self, label: str, reason: str = "") -> None:
+        """Save browser state for server-side login failures without cookie values."""
+        root = self._diagnostic_root()
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:
+            utils.logger.warning(f"[XiaoHongShuLogin] create diagnostics directory failed: {exc}")
+            return
+
+        pages = self._iter_context_pages()
+        report: dict[str, Any] = {
+            "label": label,
+            "reason": str(reason or ""),
+            "saved_at": time.time(),
+            "events": self._diagnostic_events[-120:],
+            "pages": [],
+        }
+        try:
+            cookies = await self.browser_context.cookies()
+            report["cookies"] = [
+                {"name": str(cookie.get("name") or ""), "domain": str(cookie.get("domain") or ""), "path": str(cookie.get("path") or "")}
+                for cookie in cookies
+            ]
+        except Exception as exc:
+            report["cookies_error"] = str(exc)[:300]
+
+        for index, page in enumerate(pages):
+            page_report: dict[str, Any] = {"index": index, "url": self._diagnostic_url(getattr(page, "url", ""))}
+            try:
+                page_report["title"] = str(await page.title() or "")
+            except Exception:
+                page_report["title"] = ""
+            try:
+                page_report["frames"] = [self._diagnostic_url(frame.url) for frame in page.frames]
+            except Exception:
+                page_report["frames"] = []
+            frame_details: list[dict[str, str]] = []
+            try:
+                for frame in page.frames:
+                    try:
+                        frame_text = await frame.locator("body").inner_text(timeout=1200)
+                    except Exception:
+                        frame_text = ""
+                    frame_details.append({
+                        "url": self._diagnostic_url(frame.url),
+                        "body_text": str(frame_text or "")[-3000:],
+                    })
+            except Exception:
+                pass
+            page_report["frame_details"] = frame_details
+            try:
+                body_text = await page.locator("body").inner_text(timeout=2000)
+                page_report["body_text"] = str(body_text or "")[-6000:]
+            except Exception as exc:
+                page_report["body_error"] = str(exc)[:300]
+            try:
+                screenshot_path = root / f"{label}-page-{index}.png"
+                await page.screenshot(path=str(screenshot_path), full_page=True)
+                page_report["screenshot"] = str(screenshot_path)
+            except Exception as exc:
+                page_report["screenshot_error"] = str(exc)[:300]
+            try:
+                html_path = root / f"{label}-page-{index}.html"
+                html = await page.content()
+                html_path.write_text(str(html or "")[:2_000_000], encoding="utf-8")
+                page_report["html"] = str(html_path)
+            except Exception as exc:
+                page_report["html_error"] = str(exc)[:300]
+            report["pages"].append(page_report)
+
+        report_path = root / f"{label}.json"
+        try:
+            report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+            utils.logger.info(f"[XiaoHongShuLogin] login diagnostics saved: {report_path}")
+        except Exception as exc:
+            utils.logger.warning(f"[XiaoHongShuLogin] write diagnostics failed: {exc}")
 
     def _iter_context_pages(self) -> list[Page]:
         pages = [self.context_page]
@@ -242,6 +383,7 @@ class XiaoHongShuLogin(AbstractLogin):
     async def begin(self):
         """Start login xiaohongshu"""
         utils.logger.info("[XiaoHongShuLogin.begin] Begin login xiaohongshu ...")
+        self._attach_diagnostic_hooks()
         if config.LOGIN_TYPE == "qrcode":
             await self.login_by_qrcode()
         elif config.LOGIN_TYPE == "phone":
@@ -350,6 +492,7 @@ class XiaoHongShuLogin(AbstractLogin):
     async def login_by_qrcode(self):
         """login xiaohongshu website and keep webdriver login state"""
         utils.logger.info("[XiaoHongShuLogin.login_by_qrcode] Begin login xiaohongshu by qrcode ...")
+        self._attach_diagnostic_hooks()
         if await self._has_logged_in_page():
             utils.logger.info("[XiaoHongShuLogin.login_by_qrcode] Browser is already logged in, skip qrcode login.")
             return
@@ -386,6 +529,7 @@ class XiaoHongShuLogin(AbstractLogin):
             )
             if not base64_qrcode_img:
                 utils.logger.info("[XiaoHongShuLogin.login_by_qrcode] QR code still not found; keep browser open for manual login.")
+                await self._save_login_diagnostics("qrcode-not-found", "小红书登录页未找到二维码")
 
         if base64_qrcode_img:
             # Show the QR code in a separate image viewer when it is available.
@@ -398,6 +542,7 @@ class XiaoHongShuLogin(AbstractLogin):
             await self.check_login_state(no_logged_in_session)
         except RetryError:
             utils.logger.info("[XiaoHongShuLogin.login_by_qrcode] Login xiaohongshu failed by qrcode login method ...")
+            await self._save_login_diagnostics("qrcode-login-failed", "二维码扫码后登录状态确认超时")
             sys.exit()
         finally:
             qrcode_refresh_task.cancel()

@@ -112,6 +112,13 @@ class XiaoHongShuCrawler(AbstractCrawler):
                     urls=self.cookie_urls,
                 )
                 if not await self.xhs_client.pong():
+                    try:
+                        await login_obj._save_login_diagnostics(
+                            "post-login-validation-failed",
+                            "二维码流程结束后 selfinfo 接口仍未确认登录",
+                        )
+                    except Exception:
+                        pass
                     raise RuntimeError("Xiaohongshu login validation failed after login")
             utils.emit_login_cookies(self.xhs_client.headers.get("Cookie", ""))
 
